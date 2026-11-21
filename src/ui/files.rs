@@ -112,6 +112,8 @@ pub async fn on_file_reply(
                 };
                 state::set_file_preview(Some((sid.to_string(), name.to_string(), text, true)));
             }
+            // 状态变更后必须主动重绘，否则界面停留在列表（预览“没反应”的根因）
+            rerender();
         }
         FileAction::Download => save_to_phone(name, raw, is_binary).await,
     }
@@ -132,6 +134,7 @@ pub async fn download_preview() {
 /// 退出预览回到分组清单
 pub fn back_to_groups() {
     state::set_file_preview(None);
+    rerender();
 }
 
 /// 处理下载动作的字节准备：base64 解码或文本转字节

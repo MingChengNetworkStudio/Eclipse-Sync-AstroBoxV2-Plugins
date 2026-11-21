@@ -7,13 +7,16 @@ use serde::{Deserialize, Serialize};
 const CONFIG_PATH: &str = "./eclipse-sync.config.json";
 pub const CURRENT_VERSION: u32 = 1;
 
-/// 落盘配置：目前只保存激活 APIKey，其余聊天数据均以手表端为准
+/// 落盘配置：保存激活 APIKey 与激活时获取的设备信息，其余聊天数据均以手表端为准
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct OnDiskConfig {
     #[serde(default)]
     pub version: u32,
     #[serde(default)]
     pub api_key: String,
+    /// 激活时 GET_DEVICEINFO 的回执，避免重载后设置页设备信息缺失
+    #[serde(default)]
+    pub device_info: Option<serde_json::Value>,
 }
 
 /// 从磁盘加载配置，文件缺失或损坏时返回默认值

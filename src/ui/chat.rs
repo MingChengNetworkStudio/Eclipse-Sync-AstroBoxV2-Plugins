@@ -20,8 +20,6 @@ static CHAT_CANCEL: AtomicBool = AtomicBool::new(false);
 const STREAM_RENDER_INTERVAL_MS: u128 = 150;
 /// 对话请求连接超时
 const CHAT_TIMEOUT_MS: u32 = 30_000;
-/// 自动生成会话标题的最大长度
-const AUTO_TITLE_LEN: usize = 12;
 
 // ========== 消息/会话字段辅助 ==========
 
@@ -206,7 +204,21 @@ pub async fn on_session_reply(
         .unwrap_or(0) as usize;
 
     if chunk == 0 {
+        // 打开会话时同步手表侧绑定的 AI 设定 id
+        let prompt_id = detail
+            .get("session")
+            .and_then(|s| s.get("promptId"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        state::set_selected_prompt(&prompt_id);
         state::open_session(session_id, messages, older);
+        // 聊天页的 AI 设定选择器依赖列表数据，未加载时补拉（事件驱动，不阻塞打开）
+        if state::with_state(|s| s.prompts.is_empty()) {
+            if let Err(err) = protocol::request_prompts().await {
+                tracing::warn!("加载AI设定失败: {}", err);
+            }
+        }
     } else {
         state::prepend_older_messages(messages, older);
     }
@@ -305,13 +317,12 @@ pub fn edit_provider(idx: usize) {
 
 /// 保存供应商草稿（校验 name/baseUrl 必填）
 pub async fn save_provider() {
-    let (id, name, base_url, api_key, models_text) = state::with_state(|s| {
+    let (id, name, base_url, api_key) = state::with_state(|s| {
         (
             s.provider_edit_id.clone(),
             s.provider_name_draft.trim().to_string(),
             s.provider_baseurl_draft.trim().to_string(),
             s.provider_apikey_draft.trim().to_string(),
-            s.provider_models_draft.clone(),
         )
     });
 
@@ -319,11 +330,7 @@ pub async fn save_provider() {
         show_alert("无法保存", "供应商名称和接口地址必填").await;
         return;
     }
-    let models: Vec<String> = models_text
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
+    let models = state::provider_models_draft();
     let active_model = models.first().cloned().unwrap_or_default();
 
     let mut payload = json!({
@@ -373,6 +380,37 @@ async fn on_provider_deleted(ok: bool, status: &str) {
         return;
     }
     refresh_providers().await;
+}
+
+/// 切换当前会话使用的 AI 设定。`label` 为 Select 选中的显示名，
+/// 选中「不使用AI设定」时解绑。切换结果通过 PUT_SESSION_UPDATE 同步手表
+pub async fn select_prompt(label: &str) {
+    let (prompt_id, session_id) = state::with_state(|s| {
+        let id = if label == "不使用AI设定" {
+            String::new()
+        } else {
+            s.prompts
+                .iter()
+                .find(|p| {
+                    p.get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|n| n == label)
+                        .unwrap_or(false)
+                })
+                .and_then(|p| p.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                .unwrap_or_default()
+        };
+        (id, s.current_session_id.clone())
+    });
+
+    state::set_selected_prompt(&prompt_id);
+
+    if let Some(sid) = session_id {
+        if let Err(err) = protocol::update_session(&sid, json!({ "promptId": prompt_id })).await {
+            show_alert("绑定AI设定失败", &err).await;
+        }
+    }
+    rerender();
 }
 
 // ========== 流式对话 ==========
@@ -432,16 +470,20 @@ pub async fn send_message() {
         headers.insert("Authorization".to_string(), format!("Bearer {}", bearer));
     }
 
-    // 历史消息只保留 role/content，与手表 chat.ux 的请求形态一致
+    // 历史消息只保留 role/content，与手表 chat.ux 的请求形态一致；
+    // 若会话选择了 AI 设定，在最前面注入 system 消息
     let history: Vec<Value> = state::with_state(|s| {
-        s.messages
-            .iter()
-            .filter(|m| {
-                let role = msg_role(m);
-                (role == "user" || role == "assistant") && !msg_content(m).is_empty()
-            })
-            .map(|m| json!({ "role": msg_role(m), "content": msg_content(m) }))
-            .collect()
+        let mut out: Vec<Value> = Vec::new();
+        if let Some(content) = state::prompt_content_by_id(&s.selected_prompt_id) {
+            if !content.trim().is_empty() {
+                out.push(json!({ "role": "system", "content": content }));
+            }
+        }
+        out.extend(s.messages.iter().filter(|m| {
+            let role = msg_role(m);
+            (role == "user" || role == "assistant") && !msg_content(m).is_empty()
+        }).map(|m| json!({ "role": msg_role(m), "content": msg_content(m) })));
+        out
     });
 
     let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
@@ -548,8 +590,8 @@ async fn finalize_stream(
         show_alert("同步失败", &format!("本地已保存，但写回手表失败: {}", err)).await;
     }
 
-    // 首轮对话自动用首条用户消息给会话改名（手表默认标题为「新会话」）
-    maybe_auto_rename(session_id, text).await;
+    // 刷新列表以更新 updatedAt 排序（不修改会话标题，命名由手表端负责）
+    refresh_sessions().await;
 }
 
 /// 停止当前流式生成
@@ -569,30 +611,6 @@ fn rollback_user_message(user_msg: &Value, text: &str) {
         state::pop_message();
     }
     state::set_draft(text);
-}
-
-/// 会话标题仍是默认值时，用首条用户消息前 12 个字自动改名
-async fn maybe_auto_rename(sid: &str, first_text: &str) {
-    let need_rename = state::with_state(|s| {
-        s.sessions
-            .iter()
-            .find(|sess| session_id(sess) == sid)
-            .map(|sess| {
-                let title = session_title(sess);
-                title == "新会话" || title == "未命名会话"
-            })
-            .unwrap_or(false)
-    });
-    if !need_rename {
-        return;
-    }
-    let title: String = first_text.chars().take(AUTO_TITLE_LEN).collect();
-    if title.is_empty() {
-        return;
-    }
-    if let Err(err) = protocol::update_session(sid, json!({ "title": title })).await {
-        tracing::warn!("自动改名失败: {}", err);
-    }
 }
 
 /// 生成消息 id 的随机后缀（避免同毫秒冲突）

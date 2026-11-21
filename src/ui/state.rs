@@ -169,8 +169,12 @@ pub struct PluginState {
     pub provider_name_draft: String,
     pub provider_baseurl_draft: String,
     pub provider_apikey_draft: String,
-    /// 模型草稿，每行一个模型名
-    pub provider_models_draft: String,
+    /// 模型草稿，每条一个独立可编辑项
+    pub provider_models_draft: Vec<String>,
+
+    // ----- 聊天：AI 设定 -----
+    /// 当前会话绑定的 AI 设定 id（空串表示不使用）
+    pub selected_prompt_id: String,
 
     // ----- 授权刷新 loading -----
     pub auth_refreshing: bool,
@@ -226,7 +230,8 @@ pub fn with_state<R>(f: impl FnOnce(&mut PluginState) -> R) -> R {
             provider_name_draft: String::new(),
             provider_baseurl_draft: String::new(),
             provider_apikey_draft: String::new(),
-            provider_models_draft: String::new(),
+            provider_models_draft: Vec::new(),
+            selected_prompt_id: String::new(),
             auth_refreshing: false,
             greeting: String::new(),
             greeting_hint: String::new(),
@@ -325,6 +330,7 @@ pub fn clear_activation() {
         s.provider_baseurl_draft.clear();
         s.provider_apikey_draft.clear();
         s.provider_models_draft.clear();
+        s.selected_prompt_id.clear();
         s.auth_refreshing = false;
         s.greeting.clear();
         s.greeting_hint.clear();
@@ -411,6 +417,7 @@ pub fn close_session() {
         s.next_chunk = 1;
         s.streaming_text.clear();
         s.draft.clear();
+        s.selected_prompt_id.clear();
         s.chat_view = ChatView::SessionList;
         s.render_tick = s.render_tick.wrapping_add(1);
     });
@@ -534,6 +541,7 @@ pub fn restore_from_disk(config: persist::OnDiskConfig) {
         } else {
             VerificationStatus::Verified
         };
+        s.device_info = config.device_info;
     });
 }
 
@@ -542,6 +550,7 @@ pub fn persist_now() {
     let config = with_state(|s| persist::OnDiskConfig {
         version: persist::CURRENT_VERSION,
         api_key: s.api_key.clone(),
+        device_info: s.device_info.clone(),
     });
     persist::save_config(&config);
 }
@@ -614,7 +623,7 @@ pub fn begin_provider_edit(
         s.provider_name_draft = name.to_string();
         s.provider_baseurl_draft = base_url.to_string();
         s.provider_apikey_draft = api_key.to_string();
-        s.provider_models_draft = models.join("\n");
+        s.provider_models_draft = models.to_vec();
         s.render_tick = s.render_tick.wrapping_add(1);
     });
 }
@@ -628,8 +637,43 @@ pub fn set_provider_baseurl_draft(text: &str) {
 pub fn set_provider_apikey_draft(text: &str) {
     with_state(|s| s.provider_apikey_draft = text.to_string());
 }
-pub fn set_provider_models_draft(text: &str) {
-    with_state(|s| s.provider_models_draft = text.to_string());
+
+/// 修改第 idx 个模型草稿
+pub fn update_provider_model(idx: usize, text: &str) {
+    with_state(|s| {
+        if let Some(item) = s.provider_models_draft.get_mut(idx) {
+            *item = text.to_string();
+        }
+    });
+}
+
+/// 新增一个空模型草稿行
+pub fn add_provider_model() {
+    with_state(|s| {
+        s.provider_models_draft.push(String::new());
+        s.render_tick = s.render_tick.wrapping_add(1);
+    });
+}
+
+/// 删除第 idx 个模型草稿
+pub fn remove_provider_model(idx: usize) {
+    with_state(|s| {
+        if idx < s.provider_models_draft.len() {
+            s.provider_models_draft.remove(idx);
+            s.render_tick = s.render_tick.wrapping_add(1);
+        }
+    });
+}
+
+/// 取供应商模型草稿（过滤空行）
+pub fn provider_models_draft() -> Vec<String> {
+    with_state(|s| {
+        s.provider_models_draft
+            .iter()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .collect()
+    })
 }
 
 /// 退出供应商编辑态
@@ -642,6 +686,26 @@ pub fn end_provider_edit() {
         s.provider_models_draft.clear();
         s.render_tick = s.render_tick.wrapping_add(1);
     });
+}
+
+// ========== 聊天 AI 设定 ==========
+
+/// 设置当前会话使用的 AI 设定 id（空串表示不使用）
+pub fn set_selected_prompt(id: &str) {
+    with_state(|s| s.selected_prompt_id = id.to_string());
+}
+
+/// 按 id 查找 AI 设定内容，找不到返回 None
+pub fn prompt_content_by_id(id: &str) -> Option<String> {
+    if id.is_empty() {
+        return None;
+    }
+    with_state(|s| {
+        s.prompts
+            .iter()
+            .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id))
+            .and_then(|p| p.get("content").and_then(|v| v.as_str()).map(str::to_string))
+    })
 }
 
 // ========== 授权刷新 loading ==========

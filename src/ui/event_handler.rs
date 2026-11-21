@@ -59,7 +59,10 @@ pub const AI_PROVIDER_DEL_PREFIX: &str = "ai:provider_del:";
 pub const AI_PROVIDER_NAME_INPUT: &str = "ai:provider_name_input";
 pub const AI_PROVIDER_BASEURL_INPUT: &str = "ai:provider_baseurl_input";
 pub const AI_PROVIDER_APIKEY_INPUT: &str = "ai:provider_apikey_input";
-pub const AI_PROVIDER_MODELS_INPUT: &str = "ai:provider_models_input";
+pub const AI_MODEL_INPUT_PREFIX: &str = "ai:model_input:";
+pub const AI_MODEL_ADD_EVENT: &str = "ai:model_add";
+pub const AI_MODEL_DEL_PREFIX: &str = "ai:model_del:";
+pub const AI_PROMPT_SELECT_EVENT: &str = "ai:prompt_select";
 pub const AI_PROMPT_NEW_EVENT: &str = "ai:prompt_new";
 pub const AI_PROMPT_SAVE_EVENT: &str = "ai:prompt_save";
 pub const AI_PROMPT_CANCEL_EVENT: &str = "ai:prompt_cancel";
@@ -253,6 +256,19 @@ pub async fn ui_event_processor(
         }
         return;
     }
+    if let Some(idx_str) = event_id.strip_prefix(AI_MODEL_INPUT_PREFIX) {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            state::update_provider_model(idx, &parse_event_value(event_payload));
+        }
+        return;
+    }
+    if let Some(idx_str) = event_id.strip_prefix(AI_MODEL_DEL_PREFIX) {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            state::remove_provider_model(idx);
+            rerender();
+        }
+        return;
+    }
 
     match event_id {
         // Tab
@@ -291,7 +307,13 @@ pub async fn ui_event_processor(
                 }
             }
         }
-        TAB_SETTINGS_EVENT => switch_tab(MainTab::Settings),
+        TAB_SETTINGS_EVENT => {
+            switch_tab(MainTab::Settings);
+            if state::is_activated() {
+                // 老版本未持久化设备信息，进入设置页时补拉
+                crate::ui::activation::ensure_device_info().await;
+            }
+        }
 
         // 激活
         ACT_START_EVENT | ACT_RETRY_EVENT => activation::start_activation().await,
@@ -354,8 +376,12 @@ pub async fn ui_event_processor(
         AI_PROVIDER_APIKEY_INPUT => {
             state::set_provider_apikey_draft(&parse_event_value(event_payload));
         }
-        AI_PROVIDER_MODELS_INPUT => {
-            state::set_provider_models_draft(&parse_event_value(event_payload));
+        AI_MODEL_ADD_EVENT => {
+            state::add_provider_model();
+            rerender();
+        }
+        AI_PROMPT_SELECT_EVENT => {
+            chat::select_prompt(&parse_event_value(event_payload)).await;
         }
         AI_PROMPT_NEW_EVENT => {
             prompts::new_prompt();

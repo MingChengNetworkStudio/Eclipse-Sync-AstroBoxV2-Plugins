@@ -69,6 +69,8 @@ pub async fn on_apikey_reply(ok: bool, status: &str, data: Option<serde_json::Va
     .await;
     if use_key {
         activate_with_key(key.trim()).await;
+        // 采用已有 Key 的路径不会经过 GET_DEVICEINFO 流程，补拉一次供设置页展示
+        ensure_device_info().await;
     } else {
         request_device_info().await;
     }
@@ -96,8 +98,23 @@ pub async fn on_device_info_reply(ok: bool, status: &str, data: Option<serde_jso
     }
 
     state::set_device_info(data);
+    // 落盘，避免插件重载后设置页设备信息缺失
+    state::persist_now();
     state::set_verification_status(VerificationStatus::WaitingPayment);
     rerender();
+}
+
+/// 设备信息缺失时懒加载（进入设置页等场景），已存在则直接返回
+pub async fn ensure_device_info() {
+    if state::with_state(|s| s.device_info.is_some()) {
+        return;
+    }
+    if state::first_device_addr().is_none() {
+        return;
+    }
+    if let Err(err) = protocol::request_device_info().await {
+        tracing::warn!("懒加载设备信息失败: {}", err);
+    }
 }
 
 /// 打开浏览器进入支付/激活页面

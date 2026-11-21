@@ -385,21 +385,29 @@ fn build_chat_view() -> ui::Element {
     // 顶部栏卡片：返回 + 标题 + 模型选择
     let top_bar = ui::Element::new(ui::ElementType::Div, None)
         .flex()
-        .flex_direction(ui::FlexDirection::Row)
-        .align_center()
+        .flex_direction(ui::FlexDirection::Column)
         .width_full()
         .gap(8)
         .bg(COLOR_CARD_BG)
         .radius(12)
         .padding(10)
-        .child(ghost_button("返回").on(ui::Event::Click, CHAT_BACK_EVENT))
         .child(
-            ui::Element::new(ui::ElementType::P, Some(&title))
-                .size(16)
-                .text_color(COLOR_TEXT_PRIMARY)
-                .flex_grow(1.0),
+            ui::Element::new(ui::ElementType::Div, None)
+                .flex()
+                .flex_direction(ui::FlexDirection::Row)
+                .align_center()
+                .width_full()
+                .gap(8)
+                .child(ghost_button("返回").on(ui::Event::Click, CHAT_BACK_EVENT))
+                .child(
+                    ui::Element::new(ui::ElementType::P, Some(&title))
+                        .size(16)
+                        .text_color(COLOR_TEXT_PRIMARY)
+                        .flex_grow(1.0),
+                )
+                .child(build_model_select()),
         )
-        .child(build_model_select());
+        .child(build_prompt_select());
 
     // 消息区 flex_grow 吃掉中间高度，把输入栏顶到屏幕最下方
     let mut col = ui::Element::new(ui::ElementType::Div, None)
@@ -416,6 +424,53 @@ fn build_chat_view() -> ui::Element {
     }
 
     col.child(build_message_scroll()).child(build_input_area(sending))
+}
+
+/// AI 设定下拉：不使用 + 全部已保存设定，当前选中跟随会话 promptId
+fn build_prompt_select() -> ui::Element {
+    let (prompts, selected_id) = state::with_state(|s| {
+        (
+            s.prompts
+                .iter()
+                .filter_map(|p| {
+                    p.get("name").and_then(|v| v.as_str()).map(str::to_string)
+                })
+                .collect::<Vec<_>>(),
+            s.selected_prompt_id.clone(),
+        )
+    });
+
+    // 由 id 反查显示名
+    let current = state::with_state(|s| {
+        if selected_id.is_empty() {
+            "不使用AI设定".to_string()
+        } else {
+            s.prompts
+                .iter()
+                .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(selected_id.as_str()))
+                .and_then(|p| p.get("name").and_then(|v| v.as_str()).map(str::to_string))
+                .unwrap_or_else(|| "不使用AI设定".to_string())
+        }
+    });
+
+    let mut select = ui::Element::new(ui::ElementType::Select, Some(&current))
+        .on(ui::Event::Change, AI_PROMPT_SELECT_EVENT)
+        .radius(8)
+        .padding(8)
+        .bg(COLOR_CARD_BG_2)
+        .size(13)
+        .width_full();
+
+    select = select.child(
+        ui::Element::new(ui::ElementType::Option, Some("不使用AI设定"))
+            .prop("value", "不使用AI设定"),
+    );
+    for name in &prompts {
+        select = select.child(
+            ui::Element::new(ui::ElementType::Option, Some(name)).prop("value", name),
+        );
+    }
+    select
 }
 
 /// 模型下拉
@@ -674,10 +729,7 @@ fn build_files_tab() -> ui::Element {
                                 .flex_grow(1.0),
                         )
                         .child(
-                            ghost_button("预览").on(
-                                ui::Event::Click,
-                                &format!("{}{}", FILES_PREVIEW_PREFIX, global_idx),
-                            ),
+                            primary_button("预览", &format!("{}{}", FILES_PREVIEW_PREFIX, global_idx)),
                         )
                         .child(
                             primary_button("下载", &format!("{}{}", FILES_DOWNLOAD_PREFIX, global_idx)),
@@ -831,9 +883,9 @@ fn build_active_provider_card() -> ui::Element {
     card
 }
 
-/// 供应商编辑器：新建/编辑共用，模型每行一个
+/// 供应商编辑器：名称/地址/Key 输入 + 模型行的增删改
 fn build_provider_editor() -> ui::Element {
-    let (edit_id, name, base_url, api_key, models_text) = state::with_state(|s| {
+    let (edit_id, name, base_url, api_key, models) = state::with_state(|s| {
         (
             s.provider_edit_id.clone(),
             s.provider_name_draft.clone(),
@@ -844,7 +896,7 @@ fn build_provider_editor() -> ui::Element {
     });
     let title = if edit_id.is_some() { "编辑供应商" } else { "新建供应商" };
 
-    ui::Element::new(ui::ElementType::Div, None)
+    let mut editor = ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Column)
         .width_full()
@@ -856,18 +908,43 @@ fn build_provider_editor() -> ui::Element {
         .child(build_form_input("显示名称", &name, AI_PROVIDER_NAME_INPUT))
         .child(build_form_input("接口地址（OpenAI 兼容）", &base_url, AI_PROVIDER_BASEURL_INPUT))
         .child(build_form_input("API Key（可留空）", &api_key, AI_PROVIDER_APIKEY_INPUT))
-        .child(
-            ui::Element::new(ui::ElementType::Textarea, Some(&models_text))
-                .prop("placeholder", "模型列表，每行一个模型名")
-                .width_full()
-                .height(120)
-                .padding(10)
-                .radius(8)
-                .bg(COLOR_CARD_BG_2)
-                .text_color(COLOR_TEXT_PRIMARY)
-                .size(13)
-                .on(ui::Event::Input, AI_PROVIDER_MODELS_INPUT),
-        )
+        .child(section_text("模型列表"));
+
+    // 每个模型一行：输入框 + 删除
+    for (idx, model) in models.iter().enumerate() {
+        let row = ui::Element::new(ui::ElementType::Div, None)
+            .flex()
+            .flex_direction(ui::FlexDirection::Row)
+            .align_center()
+            .width_full()
+            .gap(8)
+            .child(
+                ui::Element::new(ui::ElementType::Input, Some(model))
+                    .prop("type", "text")
+                    .prop("placeholder", "模型名")
+                    .flex_grow(1.0)
+                    .min_height(44)
+                    .padding(10)
+                    .radius(8)
+                    .bg(COLOR_CARD_BG_2)
+                    .text_color(COLOR_TEXT_PRIMARY)
+                    .size(13)
+                    .on(
+                        ui::Event::Input,
+                        &format!("{}{}", AI_MODEL_INPUT_PREFIX, idx),
+                    ),
+            )
+            .child(
+                danger_button("删除").on(
+                    ui::Event::Click,
+                    &format!("{}{}", AI_MODEL_DEL_PREFIX, idx),
+                ),
+            );
+        editor = editor.child(row);
+    }
+
+    editor
+        .child(ghost_button("＋ 添加模型").on(ui::Event::Click, AI_MODEL_ADD_EVENT))
         .child(
             ui::Element::new(ui::ElementType::Div, None)
                 .flex()
