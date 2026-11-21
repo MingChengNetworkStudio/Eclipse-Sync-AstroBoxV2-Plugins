@@ -126,17 +126,14 @@ pub async fn open_verify_url() {
     dialog::open_url(&url);
 }
 
-/// 校验激活结果。`free=true` 走免费版通道，否则走付费校验
-pub async fn verify_payment(free: bool) {
+/// 校验激活结果（付费通道）。
+/// URL 与手表 init.ux 严格对齐：`verifyCheck/Eclipse?data=...`，不带 type 参数，
+/// 该网关仅识别无 type 的付费校验与 type=free，传 type=normal 会返回 HTTP 400
+pub async fn verify_payment() {
     state::set_verification_status(VerificationStatus::Verifying);
     rerender();
 
-    let check_path = if free {
-        "/verifyCheck/Eclipse?type=free"
-    } else {
-        "/verifyCheck/Eclipse?type=normal"
-    };
-    let Some(url) = build_verify_url(check_path) else {
+    let Some(url) = build_verify_url("/verifyCheck/Eclipse") else {
         state::set_verification_status(VerificationStatus::Failed);
         rerender();
         show_alert("错误", "设备信息缺失，请重新进入激活流程").await;

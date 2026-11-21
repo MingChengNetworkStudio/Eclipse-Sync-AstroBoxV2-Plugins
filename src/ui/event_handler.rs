@@ -23,7 +23,6 @@ pub const TAB_SETTINGS_EVENT: &str = "tab_settings";
 pub const ACT_START_EVENT: &str = "act_start";
 pub const ACT_OPEN_VERIFY_EVENT: &str = "act_open_verify";
 pub const ACT_VERIFY_PAID_EVENT: &str = "act_verify_paid";
-pub const ACT_VERIFY_FREE_EVENT: &str = "act_verify_free";
 pub const ACT_RETRY_EVENT: &str = "act_retry";
 
 // 设备
@@ -325,8 +324,7 @@ pub async fn ui_event_processor(
         // 激活
         ACT_START_EVENT | ACT_RETRY_EVENT => activation::start_activation().await,
         ACT_OPEN_VERIFY_EVENT => activation::open_verify_url().await,
-        ACT_VERIFY_PAID_EVENT => activation::verify_payment(false).await,
-        ACT_VERIFY_FREE_EVENT => activation::verify_payment(true).await,
+        ACT_VERIFY_PAID_EVENT => activation::verify_payment().await,
 
         // 设备
         REFRESH_DEVICES_EVENT => refresh_device_list().await,

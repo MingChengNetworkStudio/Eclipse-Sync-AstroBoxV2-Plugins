@@ -13,7 +13,7 @@ AstroBox V2 插件，为手表快应用 [Eclipse](https://docs.b4qaq.cn/docs/ecl
 首次进入显示全屏激活向导（无 Tab），与永昼天气同步器同款状态机：
 
 1. 读取手表上已有的 APIKey：存在则可直接采用，不存在自动获取设备信息（product/deviceId/serial）
-2. 支持付费验证（`verify` + `verifyCheck?type=normal`）与免费激活（`type=free`）两条通道
+2. 浏览器打开支付页完成购买，返回后点击「验证支付」（`verifyCheck`，与手表端一致不带 type 参数）
 3. 激活成功后 Key 落盘（`eclipse-sync.config.json`），并通过 `PUT_SETTINGS` 回传手表
 4. `getInfo` 返回 201 时自动判定授权失效，清空本地状态回到激活页
 

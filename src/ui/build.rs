@@ -174,13 +174,10 @@ fn build_verification_ui() -> ui::Element {
             .child(hint_text("您选择的设备:"))
             .child(build_host_device_card())
             .child(section_spacer())
-            .child(section_text("付费版激活"))
+            .child(section_text("付费激活"))
             .child(primary_button_full("前往支付页面", ACT_OPEN_VERIFY_EVENT))
             .child(hint_text("支付完成后点击下方按钮验证"))
-            .child(primary_button_full("验证支付", ACT_VERIFY_PAID_EVENT))
-            .child(section_text("免费版激活"))
-            .child(hint_text("免费版有请求次数限制"))
-            .child(primary_button_full("免费激活", ACT_VERIFY_FREE_EVENT)),
+            .child(primary_button_full("验证支付", ACT_VERIFY_PAID_EVENT)),
 
         VerificationStatus::Verifying => root
             .child(title_text("验证中，请稍后", 24))
