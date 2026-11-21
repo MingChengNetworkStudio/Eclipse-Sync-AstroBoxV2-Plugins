@@ -282,6 +282,99 @@ pub fn on_active_provider_reply(ok: bool, data: Option<Value>) {
     }
 }
 
+// ========== 供应商新增/编辑/删除 ==========
+
+/// 进入新建供应商态
+pub fn new_provider() {
+    state::begin_provider_edit(None, "", "", "", &[]);
+}
+
+/// 进入编辑态：把所选自定义供应商填入草稿
+pub fn edit_provider(idx: usize) {
+    let target = state::with_state(|s| s.providers.get(idx).cloned());
+    if let Some(p) = target {
+        state::begin_provider_edit(
+            Some(p.id),
+            &p.name,
+            &p.base_url,
+            &p.api_key,
+            &p.models,
+        );
+    }
+}
+
+/// 保存供应商草稿（校验 name/baseUrl 必填）
+pub async fn save_provider() {
+    let (id, name, base_url, api_key, models_text) = state::with_state(|s| {
+        (
+            s.provider_edit_id.clone(),
+            s.provider_name_draft.trim().to_string(),
+            s.provider_baseurl_draft.trim().to_string(),
+            s.provider_apikey_draft.trim().to_string(),
+            s.provider_models_draft.clone(),
+        )
+    });
+
+    if name.is_empty() || base_url.is_empty() {
+        show_alert("无法保存", "供应商名称和接口地址必填").await;
+        return;
+    }
+    let models: Vec<String> = models_text
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let active_model = models.first().cloned().unwrap_or_default();
+
+    let mut payload = json!({
+        "name": name,
+        "baseUrl": base_url,
+        "apiKey": api_key,
+        "models": models,
+        "activeModel": active_model,
+    });
+    if let Some(id) = id.filter(|s| !s.is_empty()) {
+        payload["id"] = json!(id);
+    }
+
+    if let Err(err) = protocol::put_provider(payload).await {
+        show_alert("保存失败", &err).await;
+    }
+}
+
+/// 删除自定义供应商（二次确认）
+pub async fn delete_provider(idx: usize) {
+    let target = state::with_state(|s| s.providers.get(idx).cloned());
+    let Some(p) = target else {
+        return;
+    };
+    if !show_confirm("删除供应商", &format!("确定删除「{}」？", p.name)).await {
+        return;
+    }
+    if let Err(err) = protocol::delete_provider(&p.id).await {
+        show_alert("删除失败", &err).await;
+    }
+}
+
+/// PUT_PROVIDER_DONE 回执：退出编辑态并刷新列表
+async fn on_provider_saved(ok: bool, status: &str) {
+    if !ok {
+        show_alert("保存失败", status).await;
+        return;
+    }
+    state::end_provider_edit();
+    refresh_providers().await;
+}
+
+/// DEL_PROVIDER_DONE 回执：刷新列表（手表可能已自动切换激活供应商）
+async fn on_provider_deleted(ok: bool, status: &str) {
+    if !ok {
+        show_alert("删除失败", status).await;
+        return;
+    }
+    refresh_providers().await;
+}
+
 // ========== 流式对话 ==========
 
 /// 发送输入框内容并发起流式请求
@@ -530,8 +623,8 @@ pub async fn dispatch_reply(kind: PendingKind, ok: bool, status: &str, data: Opt
         PendingKind::FilesGrouped => {
             crate::ui::files::on_files_reply(ok, status, data).await
         }
-        PendingKind::OpenFile(sid, name) => {
-            crate::ui::files::on_file_reply(&sid, &name, ok, status, data).await
+        PendingKind::OpenFile(sid, name, action) => {
+            crate::ui::files::on_file_reply(&sid, &name, action, ok, status, data).await
         }
         PendingKind::Prompts => crate::ui::prompts::on_prompts_reply(ok, data),
         PendingKind::PutPrompt => {
@@ -540,6 +633,8 @@ pub async fn dispatch_reply(kind: PendingKind, ok: bool, status: &str, data: Opt
         PendingKind::DelPrompt(id) => {
             crate::ui::prompts::on_prompt_deleted(&id, ok, status).await
         }
+        PendingKind::PutProvider => on_provider_saved(ok, status).await,
+        PendingKind::DelProvider => on_provider_deleted(ok, status).await,
         // 激活相关与纯记录类回执不在此处理
         PendingKind::ActApikey
         | PendingKind::ActDeviceInfo

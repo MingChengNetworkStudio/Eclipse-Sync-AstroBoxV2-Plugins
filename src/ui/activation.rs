@@ -254,10 +254,20 @@ pub async fn delete_local_auth() {
     show_alert("成功", "本地授权信息已删除").await;
 }
 
-/// 刷新授权信息与 AI 用量（设置页按钮）
+/// 刷新授权信息与 AI 用量（设置页按钮）。
+/// 立即给 loading 反馈并后台执行，避免 WASI 阻塞期间按钮看起来“点不动”
 pub async fn refresh_auth_info() {
-    fetch_get_info().await;
-    fetch_relay_usage().await;
+    if state::with_state(|s| s.auth_refreshing) {
+        return;
+    }
+    state::set_auth_refreshing(true);
+    rerender();
+    astrobox_ng_wit::spawn(async move {
+        fetch_get_info().await;
+        fetch_relay_usage().await;
+        state::set_auth_refreshing(false);
+        rerender();
+    });
 }
 
 // ========== 辅助函数 ==========

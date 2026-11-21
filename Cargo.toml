@@ -1,6 +1,6 @@
 [package]
 name = "eclipse_sync_astrobox_v2_plugin"
-version = "1.6.1"
+version = "1.7.0"
 edition = "2024"
 
 [lib]
@@ -18,3 +18,4 @@ waki = "0.5.1"
 url = "2"
 urlencoding = "2"
 flate2 = "1"
+base64 = "0.22"

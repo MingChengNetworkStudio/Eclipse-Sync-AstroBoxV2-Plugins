@@ -43,12 +43,23 @@ pub const CHAT_STOP_EVENT: &str = "chat:stop";
 
 // 文件管理
 pub const FILES_REFRESH_EVENT: &str = "files:refresh";
-pub const FILES_OPEN_PREFIX: &str = "files:open:";
+pub const FILES_PREVIEW_PREFIX: &str = "files:preview:";
+pub const FILES_DOWNLOAD_PREFIX: &str = "files:download:";
 pub const FILES_BACK_EVENT: &str = "files:back";
+pub const FILES_DOWNLOAD_CURRENT_EVENT: &str = "files:download_current";
 
 // AI 设置
 pub const AI_REFRESH_EVENT: &str = "ai:refresh";
 pub const AI_PROVIDER_EVENT: &str = "ai:provider";
+pub const AI_PROVIDER_NEW_EVENT: &str = "ai:provider_new";
+pub const AI_PROVIDER_SAVE_EVENT: &str = "ai:provider_save";
+pub const AI_PROVIDER_CANCEL_EVENT: &str = "ai:provider_cancel";
+pub const AI_PROVIDER_EDIT_PREFIX: &str = "ai:provider_edit:";
+pub const AI_PROVIDER_DEL_PREFIX: &str = "ai:provider_del:";
+pub const AI_PROVIDER_NAME_INPUT: &str = "ai:provider_name_input";
+pub const AI_PROVIDER_BASEURL_INPUT: &str = "ai:provider_baseurl_input";
+pub const AI_PROVIDER_APIKEY_INPUT: &str = "ai:provider_apikey_input";
+pub const AI_PROVIDER_MODELS_INPUT: &str = "ai:provider_models_input";
 pub const AI_PROMPT_NEW_EVENT: &str = "ai:prompt_new";
 pub const AI_PROMPT_SAVE_EVENT: &str = "ai:prompt_save";
 pub const AI_PROMPT_CANCEL_EVENT: &str = "ai:prompt_cancel";
@@ -204,9 +215,15 @@ pub async fn ui_event_processor(
         }
         return;
     }
-    if let Some(idx_str) = event_id.strip_prefix(FILES_OPEN_PREFIX) {
+    if let Some(idx_str) = event_id.strip_prefix(FILES_PREVIEW_PREFIX) {
         if let Ok(idx) = idx_str.parse::<usize>() {
-            files::open_file(idx).await;
+            files::open_file(idx, protocol::FileAction::Preview).await;
+        }
+        return;
+    }
+    if let Some(idx_str) = event_id.strip_prefix(FILES_DOWNLOAD_PREFIX) {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            files::open_file(idx, protocol::FileAction::Download).await;
         }
         return;
     }
@@ -220,6 +237,19 @@ pub async fn ui_event_processor(
     if let Some(idx_str) = event_id.strip_prefix(AI_PROMPT_DEL_PREFIX) {
         if let Ok(idx) = idx_str.parse::<usize>() {
             prompts::delete_prompt(idx).await;
+        }
+        return;
+    }
+    if let Some(idx_str) = event_id.strip_prefix(AI_PROVIDER_EDIT_PREFIX) {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            chat::edit_provider(idx);
+            rerender();
+        }
+        return;
+    }
+    if let Some(idx_str) = event_id.strip_prefix(AI_PROVIDER_DEL_PREFIX) {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            chat::delete_provider(idx).await;
         }
         return;
     }
@@ -295,6 +325,7 @@ pub async fn ui_event_processor(
         // 文件管理
         FILES_REFRESH_EVENT => files::refresh_files().await,
         FILES_BACK_EVENT => files::back_to_groups(),
+        FILES_DOWNLOAD_CURRENT_EVENT => files::download_preview().await,
 
         // AI 设置
         AI_REFRESH_EVENT => {
@@ -304,6 +335,27 @@ pub async fn ui_event_processor(
         AI_PROVIDER_EVENT => {
             let label = parse_event_value(event_payload);
             chat::select_provider_by_label(&label).await;
+        }
+        AI_PROVIDER_NEW_EVENT => {
+            chat::new_provider();
+            rerender();
+        }
+        AI_PROVIDER_SAVE_EVENT => chat::save_provider().await,
+        AI_PROVIDER_CANCEL_EVENT => {
+            state::end_provider_edit();
+            rerender();
+        }
+        AI_PROVIDER_NAME_INPUT => {
+            state::set_provider_name_draft(&parse_event_value(event_payload));
+        }
+        AI_PROVIDER_BASEURL_INPUT => {
+            state::set_provider_baseurl_draft(&parse_event_value(event_payload));
+        }
+        AI_PROVIDER_APIKEY_INPUT => {
+            state::set_provider_apikey_draft(&parse_event_value(event_payload));
+        }
+        AI_PROVIDER_MODELS_INPUT => {
+            state::set_provider_models_draft(&parse_event_value(event_payload));
         }
         AI_PROMPT_NEW_EVENT => {
             prompts::new_prompt();

@@ -45,14 +45,27 @@ pub enum PendingKind {
     UpdateSession(String),
     /// GET_FILES_GROUPED 回执
     FilesGrouped,
-    /// GET_SESSION_FILE 回执，携带 (会话 id, 文件名)
-    OpenFile(String, String),
+    /// GET_SESSION_FILE 回执，携带 (会话 id, 文件名, 预览/下载动作)
+    OpenFile(String, String, FileAction),
     /// GET_PROMPTS 回执
     Prompts,
     /// PUT_PROMPT 回执（保存后刷新列表）
     PutPrompt,
     /// DEL_PROMPT 回执，携带被删设定 id
     DelPrompt(String),
+    /// PUT_PROVIDER 回执（新增/编辑供应商后刷新列表）
+    PutProvider,
+    /// DEL_PROVIDER 回执
+    DelProvider,
+}
+
+/// 文件读取后的处理动作
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FileAction {
+    /// 页面内预览
+    Preview,
+    /// 调宿主保存对话框下载到手机
+    Download,
 }
 
 struct PendingEntry {
@@ -343,15 +356,19 @@ pub async fn request_files_grouped() -> Result<(), String> {
     .await
 }
 
-/// 发起 GET_SESSION_FILE 读取文本文件
-pub async fn request_session_file(session_id: &str, name: &str) -> Result<(), String> {
+/// 发起 GET_SESSION_FILE 读取会话工作区文件
+pub async fn request_session_file(
+    session_id: &str,
+    name: &str,
+    action: FileAction,
+) -> Result<(), String> {
     let addr = require_addr().await?;
     send(
         &addr,
         "GET_SESSION_FILE",
         "SESSION_FILE",
         Some(json!({ "id": session_id, "name": name })),
-        PendingKind::OpenFile(session_id.to_string(), name.to_string()),
+        PendingKind::OpenFile(session_id.to_string(), name.to_string(), action),
     )
     .await
 }
@@ -397,6 +414,34 @@ pub async fn delete_prompt(prompt_id: &str) -> Result<(), String> {
         "DEL_PROMPT_DONE",
         Some(json!({ "id": prompt_id })),
         PendingKind::DelPrompt(prompt_id.to_string()),
+    )
+    .await
+}
+
+// ========== 供应商编辑 ==========
+
+/// 发起 PUT_PROVIDER（无 id 为新建，有 id 为覆盖更新）
+pub async fn put_provider(provider: Value) -> Result<(), String> {
+    let addr = require_addr().await?;
+    send(
+        &addr,
+        "PUT_PROVIDER",
+        "PUT_PROVIDER_DONE",
+        Some(provider),
+        PendingKind::PutProvider,
+    )
+    .await
+}
+
+/// 发起 DEL_PROVIDER
+pub async fn delete_provider(provider_id: &str) -> Result<(), String> {
+    let addr = require_addr().await?;
+    send(
+        &addr,
+        "DEL_PROVIDER",
+        "DEL_PROVIDER_DONE",
+        Some(json!({ "id": provider_id })),
+        PendingKind::DelProvider,
     )
     .await
 }

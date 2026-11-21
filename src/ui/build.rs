@@ -41,6 +41,7 @@ fn build_main_ui() -> ui::Element {
         .flex()
         .flex_direction(ui::FlexDirection::Column)
         .width_full()
+        .height_full()
         .padding(20)
         .gap(16);
 
@@ -367,7 +368,7 @@ fn build_session_row(session: &serde_json::Value, idx: usize) -> ui::Element {
         )
 }
 
-/// 对话视图：顶部栏 + 消息区 + 底部聊天栏
+/// 对话视图：顶部栏 + 自适应消息区（flex_grow 撑满）+ 贴底聊天栏
 fn build_chat_view() -> ui::Element {
     let (title, has_older, messages_loading, sending) = state::with_state(|s| {
         let title = s
@@ -381,13 +382,16 @@ fn build_chat_view() -> ui::Element {
         (title, s.older_chunks > 0, s.messages_loading, s.sending)
     });
 
-    // 顶部栏：返回 + 标题 + 模型选择
+    // 顶部栏卡片：返回 + 标题 + 模型选择
     let top_bar = ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Row)
         .align_center()
         .width_full()
         .gap(8)
+        .bg(COLOR_CARD_BG)
+        .radius(12)
+        .padding(10)
         .child(ghost_button("返回").on(ui::Event::Click, CHAT_BACK_EVENT))
         .child(
             ui::Element::new(ui::ElementType::P, Some(&title))
@@ -397,10 +401,12 @@ fn build_chat_view() -> ui::Element {
         )
         .child(build_model_select());
 
+    // 消息区 flex_grow 吃掉中间高度，把输入栏顶到屏幕最下方
     let mut col = ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Column)
         .width_full()
+        .height_full()
         .gap(10)
         .child(top_bar);
 
@@ -450,7 +456,7 @@ fn build_model_select() -> ui::Element {
     select
 }
 
-/// 消息滚动区
+/// 消息滚动区：flex_grow 撑满顶部栏与输入栏之间的空间
 fn build_message_scroll() -> ui::Element {
     let (messages, sending, streaming) = state::with_state(|s| {
         (s.messages.clone(), s.sending, s.streaming_text.clone())
@@ -459,9 +465,10 @@ fn build_message_scroll() -> ui::Element {
     let mut scroll = ui::Element::new(ui::ElementType::ScrollArea, None)
         .flex()
         .flex_direction(ui::FlexDirection::Column)
-        .gap(10)
+        .gap(12)
         .width_full()
-        .height(SCROLL_HEIGHT)
+        .flex_grow(1.0)
+        .min_height(240)
         .padding(8);
 
     if messages.is_empty() && !sending {
@@ -506,26 +513,17 @@ fn build_chat_welcome() -> ui::Element {
         )
 }
 
-/// 单条消息气泡：user 右蓝、assistant 左灰，带角色小标签
+/// 单条消息气泡：user 右蓝、assistant 左灰，用位置与颜色区分角色
 fn build_bubble(role: &str, content: &str) -> ui::Element {
     let is_user = role == "user";
     let bg = if is_user { COLOR_BUBBLE_USER } else { COLOR_BUBBLE_ASSISTANT };
     let text_color = if is_user { "#FFFFFF" } else { COLOR_TEXT_PRIMARY };
-    let role_label = if is_user { "我" } else { "Eclipse" };
 
     let bubble = ui::Element::new(ui::ElementType::Div, None)
-        .radius(12)
-        .padding(12)
+        .radius(14)
+        .padding(14)
         .max_width(280)
         .bg(bg)
-        .flex()
-        .flex_direction(ui::FlexDirection::Column)
-        .gap(4)
-        .child(
-            ui::Element::new(ui::ElementType::P, Some(role_label))
-                .size(10)
-                .text_color(if is_user { "#DBEAFE" } else { COLOR_TEXT_MUTED }),
-        )
         .child(
             ui::Element::new(ui::ElementType::P, Some(content))
                 .size(14)
@@ -544,16 +542,17 @@ fn build_bubble(role: &str, content: &str) -> ui::Element {
     row.child(bubble)
 }
 
-/// 底部聊天栏：输入框 + 发送/停止
+/// 底部聊天栏：卡片容器 + 加高输入框 + 发送/停止，固定在视图最下方
 fn build_input_area(sending: bool) -> ui::Element {
     let draft = state::with_state(|s| s.draft.clone());
     let input = ui::Element::new(ui::ElementType::Input, Some(&draft))
         .prop("type", "text")
         .prop("placeholder", "输入消息…")
         .flex_grow(1.0)
-        .padding(10)
+        .min_height(48)
+        .padding(12)
         .radius(10)
-        .bg(COLOR_CARD_BG)
+        .bg(COLOR_CARD_BG_2)
         .text_color(COLOR_TEXT_PRIMARY)
         .size(14)
         .on(ui::Event::Input, CHAT_INPUT_EVENT);
@@ -570,6 +569,9 @@ fn build_input_area(sending: bool) -> ui::Element {
         .align_center()
         .width_full()
         .gap(8)
+        .bg(COLOR_CARD_BG)
+        .radius(14)
+        .padding(10)
         .child(input)
         .child(action)
 }
@@ -578,8 +580,8 @@ fn build_input_area(sending: bool) -> ui::Element {
 
 fn build_files_tab() -> ui::Element {
     // 预览视图优先
-    if let Some((name, text)) = state::with_state(|s| s.file_preview.clone()) {
-        return build_file_preview(&name, &text);
+    if let Some((_, name, text, downloadable)) = state::with_state(|s| s.file_preview.clone()) {
+        return build_file_preview(&name, &text, downloadable);
     }
 
     let (groups, loading) = state::with_state(|s| (s.files_groups.clone(), s.files_loading));
@@ -612,10 +614,11 @@ fn build_files_tab() -> ui::Element {
         return col.child(hint_text(hint));
     }
 
-    // 拍平索引与 files::open_file 的顺序保持一致
+    // 拍平索引与 files::flat_files/open_file 的顺序保持一致
     let mut global_idx = 0usize;
     for group in &groups {
-        let title = group
+        let group_id = group.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let group_title = group
             .get("title")
             .and_then(|v| v.as_str())
             .unwrap_or("已删除的会话");
@@ -628,32 +631,87 @@ fn build_files_tab() -> ui::Element {
             continue;
         }
 
-        col = col.child(section_title(title));
+        col = col.child(section_title(group_title));
         for path in &files {
             let path = path.as_str().unwrap_or("");
             let name = path.rsplit('/').next().unwrap_or(path);
-            col = col.child(
-                ui::Element::new(ui::ElementType::Button, Some(name))
-                    .without_default_styles()
-                    .width_full()
-                    .padding(12)
-                    .radius(10)
-                    .bg(COLOR_CARD_BG)
-                    .text_color(COLOR_TEXT_PRIMARY)
-                    .size(13)
-                    .on(
-                        ui::Event::Click,
-                        &format!("{}{}", FILES_OPEN_PREFIX, global_idx),
-                    ),
-            );
+
+            if group_id.is_empty() {
+                // 「其他文件」分组不在会话工作区，协议无法读取
+                col = col.child(
+                    ui::Element::new(ui::ElementType::Div, None)
+                        .flex()
+                        .flex_direction(ui::FlexDirection::Row)
+                        .align_center()
+                        .width_full()
+                        .bg(COLOR_CARD_BG)
+                        .radius(10)
+                        .padding(12)
+                        .gap(8)
+                        .child(
+                            ui::Element::new(ui::ElementType::P, Some(name))
+                                .size(13)
+                                .text_color(COLOR_TEXT_MUTED)
+                                .flex_grow(1.0),
+                        )
+                        .child(detail_text("不可操作")),
+                );
+            } else {
+                col = col.child(
+                    ui::Element::new(ui::ElementType::Div, None)
+                        .flex()
+                        .flex_direction(ui::FlexDirection::Row)
+                        .align_center()
+                        .width_full()
+                        .bg(COLOR_CARD_BG)
+                        .radius(10)
+                        .padding(10)
+                        .gap(8)
+                        .child(
+                            ui::Element::new(ui::ElementType::P, Some(name))
+                                .size(13)
+                                .text_color(COLOR_TEXT_PRIMARY)
+                                .flex_grow(1.0),
+                        )
+                        .child(
+                            ghost_button("预览").on(
+                                ui::Event::Click,
+                                &format!("{}{}", FILES_PREVIEW_PREFIX, global_idx),
+                            ),
+                        )
+                        .child(
+                            primary_button("下载", &format!("{}{}", FILES_DOWNLOAD_PREFIX, global_idx)),
+                        ),
+                );
+            }
             global_idx += 1;
         }
     }
     col
 }
 
-/// 文件预览视图
-fn build_file_preview(name: &str, text: &str) -> ui::Element {
+/// 文件预览视图：标题栏（返回+文件名+下载）+ 内容滚动区
+fn build_file_preview(name: &str, text: &str, downloadable: bool) -> ui::Element {
+    let mut top_bar = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Row)
+        .align_center()
+        .width_full()
+        .gap(8)
+        .bg(COLOR_CARD_BG)
+        .radius(12)
+        .padding(10)
+        .child(ghost_button("返回").on(ui::Event::Click, FILES_BACK_EVENT))
+        .child(
+            ui::Element::new(ui::ElementType::P, Some(name))
+                .size(14)
+                .text_color(COLOR_TEXT_PRIMARY)
+                .flex_grow(1.0),
+        );
+    if downloadable {
+        top_bar = top_bar.child(primary_button("下载", FILES_DOWNLOAD_CURRENT_EVENT));
+    }
+
     let scroll = ui::Element::new(ui::ElementType::ScrollArea, None)
         .flex()
         .flex_direction(ui::FlexDirection::Column)
@@ -674,20 +732,7 @@ fn build_file_preview(name: &str, text: &str) -> ui::Element {
         .flex_direction(ui::FlexDirection::Column)
         .width_full()
         .gap(10)
-        .child(
-            ui::Element::new(ui::ElementType::Div, None)
-                .flex()
-                .flex_direction(ui::FlexDirection::Row)
-                .align_center()
-                .gap(8)
-                .child(ghost_button("返回").on(ui::Event::Click, FILES_BACK_EVENT))
-                .child(
-                    ui::Element::new(ui::ElementType::P, Some(name))
-                        .size(15)
-                        .text_color(COLOR_TEXT_PRIMARY)
-                        .flex_grow(1.0),
-                ),
-        )
+        .child(top_bar)
         .child(scroll)
 }
 
@@ -704,6 +749,7 @@ fn build_ai_settings_tab() -> ui::Element {
         .child(build_section_header("供应商", AI_REFRESH_EVENT))
         .child(build_provider_select())
         .child(build_active_provider_card())
+        .child(build_provider_editor())
         .child(build_custom_provider_list())
         .child(section_spacer())
         .child(section_title("AI 设定"))
@@ -740,18 +786,18 @@ fn build_provider_select() -> ui::Element {
     select
 }
 
-/// 当前生效供应商信息卡
+/// 当前生效供应商信息卡（含模型清单）
 fn build_active_provider_card() -> ui::Element {
-    let (name, base_url, model, model_count) = state::with_state(|s| {
+    let (name, base_url, model, models) = state::with_state(|s| {
         (
             s.active_provider.name.clone(),
             s.active_provider.base_url.clone(),
             s.active_provider.active_model.clone(),
-            s.active_provider.models.len(),
+            s.active_provider.models.clone(),
         )
     });
 
-    ui::Element::new(ui::ElementType::Div, None)
+    let mut card = ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Column)
         .width_full()
@@ -765,15 +811,94 @@ fn build_active_provider_card() -> ui::Element {
                 .text_color(COLOR_TEXT_PRIMARY),
         )
         .child(detail_text(&format!("接口: {}", base_url)))
-        .child(detail_text(&format!("当前模型: {}", if model.is_empty() { "未选择" } else { &model })))
-        .child(detail_text(&format!("可用模型: {} 个", model_count)))
+        .child(detail_text(&format!(
+            "当前模型: {}",
+            if model.is_empty() { "未选择" } else { &model }
+        )));
+
+    // 模型清单逐行展示
+    if !models.is_empty() {
+        card = card.child(detail_text(&format!("可用模型（{} 个）:", models.len())));
+        for m in &models {
+            card = card.child(
+                ui::Element::new(ui::ElementType::P, Some(m))
+                    .size(12)
+                    .text_color(COLOR_TEXT_SECONDARY)
+                    .margin_left(8),
+            );
+        }
+    }
+    card
 }
 
-/// 自定义供应商列表（只读展示，编辑在手表端进行）
+/// 供应商编辑器：新建/编辑共用，模型每行一个
+fn build_provider_editor() -> ui::Element {
+    let (edit_id, name, base_url, api_key, models_text) = state::with_state(|s| {
+        (
+            s.provider_edit_id.clone(),
+            s.provider_name_draft.clone(),
+            s.provider_baseurl_draft.clone(),
+            s.provider_apikey_draft.clone(),
+            s.provider_models_draft.clone(),
+        )
+    });
+    let title = if edit_id.is_some() { "编辑供应商" } else { "新建供应商" };
+
+    ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .width_full()
+        .gap(8)
+        .bg(COLOR_CARD_BG)
+        .radius(12)
+        .padding(14)
+        .child(section_text(title))
+        .child(build_form_input("显示名称", &name, AI_PROVIDER_NAME_INPUT))
+        .child(build_form_input("接口地址（OpenAI 兼容）", &base_url, AI_PROVIDER_BASEURL_INPUT))
+        .child(build_form_input("API Key（可留空）", &api_key, AI_PROVIDER_APIKEY_INPUT))
+        .child(
+            ui::Element::new(ui::ElementType::Textarea, Some(&models_text))
+                .prop("placeholder", "模型列表，每行一个模型名")
+                .width_full()
+                .height(120)
+                .padding(10)
+                .radius(8)
+                .bg(COLOR_CARD_BG_2)
+                .text_color(COLOR_TEXT_PRIMARY)
+                .size(13)
+                .on(ui::Event::Input, AI_PROVIDER_MODELS_INPUT),
+        )
+        .child(
+            ui::Element::new(ui::ElementType::Div, None)
+                .flex()
+                .flex_direction(ui::FlexDirection::Row)
+                .gap(8)
+                .child(primary_button("保存", AI_PROVIDER_SAVE_EVENT))
+                .child(ghost_button("清空").on(ui::Event::Click, AI_PROVIDER_CANCEL_EVENT))
+                .child(ghost_button("新建").on(ui::Event::Click, AI_PROVIDER_NEW_EVENT)),
+        )
+}
+
+/// 表单输入框统一样式
+fn build_form_input(placeholder: &str, value: &str, event_id: &str) -> ui::Element {
+    ui::Element::new(ui::ElementType::Input, Some(value))
+        .prop("type", "text")
+        .prop("placeholder", placeholder)
+        .width_full()
+        .min_height(44)
+        .padding(10)
+        .radius(8)
+        .bg(COLOR_CARD_BG_2)
+        .text_color(COLOR_TEXT_PRIMARY)
+        .size(13)
+        .on(ui::Event::Input, event_id)
+}
+
+/// 自定义供应商列表：每行带编辑/删除
 fn build_custom_provider_list() -> ui::Element {
     let providers = state::with_state(|s| s.providers.clone());
     if providers.is_empty() {
-        return hint_text("暂无自定义供应商，可在手表端添加");
+        return hint_text("暂无自定义供应商，可在上方表单新建");
     }
 
     let mut col = ui::Element::new(ui::ElementType::Div, None)
@@ -781,24 +906,43 @@ fn build_custom_provider_list() -> ui::Element {
         .flex_direction(ui::FlexDirection::Column)
         .width_full()
         .gap(8);
-    for provider in &providers {
-        col = col.child(
-            ui::Element::new(ui::ElementType::Div, None)
-                .flex()
-                .flex_direction(ui::FlexDirection::Column)
-                .width_full()
-                .gap(4)
-                .bg(COLOR_CARD_BG)
-                .radius(12)
-                .padding(12)
-                .child(
-                    ui::Element::new(ui::ElementType::P, Some(&provider.name))
-                        .size(14)
-                        .text_color(COLOR_TEXT_PRIMARY),
-                )
-                .child(detail_text(&provider.base_url))
-                .child(detail_text(&format!("模型: {} 个", provider.models.len()))),
-        );
+    for (idx, provider) in providers.iter().enumerate() {
+        let info = ui::Element::new(ui::ElementType::Div, None)
+            .flex()
+            .flex_direction(ui::FlexDirection::Column)
+            .gap(4)
+            .flex_grow(1.0)
+            .child(
+                ui::Element::new(ui::ElementType::P, Some(&provider.name))
+                    .size(14)
+                    .text_color(COLOR_TEXT_PRIMARY),
+            )
+            .child(detail_text(&provider.base_url))
+            .child(detail_text(&format!("模型: {} 个", provider.models.len())));
+
+        let row = ui::Element::new(ui::ElementType::Div, None)
+            .flex()
+            .flex_direction(ui::FlexDirection::Row)
+            .align_center()
+            .width_full()
+            .gap(8)
+            .bg(COLOR_CARD_BG)
+            .radius(12)
+            .padding(12)
+            .child(info)
+            .child(
+                ghost_button("编辑").on(
+                    ui::Event::Click,
+                    &format!("{}{}", AI_PROVIDER_EDIT_PREFIX, idx),
+                ),
+            )
+            .child(
+                danger_button("删除").on(
+                    ui::Event::Click,
+                    &format!("{}{}", AI_PROVIDER_DEL_PREFIX, idx),
+                ),
+            );
+        col = col.child(row);
     }
     col
 }
@@ -940,7 +1084,7 @@ fn build_settings_tab() -> ui::Element {
         .child(build_balance_card())
         .child(build_relay_usage_card())
         .child(build_device_info_card())
-        .child(primary_button_full("刷新授权信息", SET_REFRESH_AUTH_EVENT))
+        .child(build_refresh_auth_button())
         .child(build_revoke_card())
         .child(section_title("更多内容"))
         .child(build_link_card(
@@ -1271,27 +1415,108 @@ fn build_device_info_card() -> ui::Element {
     card
 }
 
-/// 撤销授权红色卡
+/// 刷新授权信息按钮（Eternal 同款 icon+text 全宽按钮，支持 loading 态）
+fn build_refresh_auth_button() -> ui::Element {
+    let refreshing = state::with_state(|s| s.auth_refreshing);
+    let label = if refreshing {
+        "刷新中…"
+    } else {
+        "刷新授权信息"
+    };
+    let mut button = build_icon_text_button_full(label, icons::refresh_svg(), SET_REFRESH_AUTH_EVENT);
+    if refreshing {
+        button = button.disabled();
+    }
+    button
+}
+
+/// 撤销授权红色卡（Eternal build_settings_card_colored 同款：淡红底+红字+图标）
 fn build_revoke_card() -> ui::Element {
+    build_colored_card(
+        icons::refresh_svg(),
+        "撤销授权",
+        Some("删除本地 Key 与全部缓存数据"),
+        SET_REVOKE_EVENT,
+        "#F4433626",
+        "#F44336",
+    )
+}
+
+// ========== 通用组件 ==========
+
+/// 图标+文字全宽按钮（复刻 Eternal build_icon_text_button_full）
+fn build_icon_text_button_full(
+    label: &str,
+    icon_svg: String,
+    event_id: &str,
+) -> ui::Element {
+    let icon = ui::Element::new(ui::ElementType::Svg, Some(&icon_svg))
+        .width(22)
+        .height(22);
+    let text = ui::Element::new(ui::ElementType::Span, Some(label)).size(14);
+
+    ui::Element::new(ui::ElementType::Button, None)
+        .without_default_styles()
+        .on(ui::Event::Click, event_id)
+        .radius(12)
+        .padding(14)
+        .bg(COLOR_CARD_BG_2)
+        .text_color(COLOR_TEXT_PRIMARY)
+        .width_full()
+        .flex()
+        .align_center()
+        .gap(8)
+        .child(icon)
+        .child(text)
+}
+
+/// 彩色设置卡（复刻 Eternal build_settings_card_colored，用于危险操作）
+fn build_colored_card(
+    icon_svg: String,
+    title: &str,
+    desc: Option<&str>,
+    click_event: &str,
+    bg_color: &str,
+    text_color: &str,
+) -> ui::Element {
+    let icon = ui::Element::new(ui::ElementType::Svg, Some(&icon_svg))
+        .width(22)
+        .height(22)
+        .text_color(text_color);
+
+    let mut text_col = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .width_full()
+        .child(
+            ui::Element::new(ui::ElementType::P, Some(title))
+                .size(15)
+                .text_color(text_color),
+        );
+    if let Some(desc) = desc {
+        text_col = text_col.child(
+            ui::Element::new(ui::ElementType::P, Some(desc))
+                .size(13)
+                .text_color(text_color),
+        );
+    }
+
     ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Row)
         .align_center()
         .width_full()
-        .bg(COLOR_DANGER_BG)
+        .bg(bg_color)
         .radius(12)
-        .padding(14)
-        .on(ui::Event::Click, SET_REVOKE_EVENT)
-        .child(
-            ui::Element::new(ui::ElementType::P, Some("撤销授权"))
-                .size(15)
-                .text_color(COLOR_TEXT_DANGER)
-                .flex_grow(1.0),
-        )
-        .child(detail_text("删除本地 Key 与缓存"))
+        .padding_left(12)
+        .padding_right(12)
+        .padding_top(12)
+        .padding_bottom(12)
+        .gap(10)
+        .on(ui::Event::Click, click_event)
+        .child(icon)
+        .child(text_col)
 }
-
-// ========== 通用组件 ==========
 
 fn build_section_header(title: &str, refresh_event: &str) -> ui::Element {
     ui::Element::new(ui::ElementType::Div, None)

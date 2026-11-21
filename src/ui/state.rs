@@ -151,8 +151,8 @@ pub struct PluginState {
     /// GET_FILES_GROUPED 回执：[{id, title, files:[相对路径]}]
     pub files_groups: Vec<serde_json::Value>,
     pub files_loading: bool,
-    /// 文件预览：(文件名, 文本内容或错误提示)
-    pub file_preview: Option<(String, String)>,
+    /// 文件预览：(会话 id, 文件名, 文本内容或提示, 是否可下载)
+    pub file_preview: Option<(String, String, String, bool)>,
 
     // ----- AI 设定 -----
     /// GET_PROMPTS 回执：[{id, name, content, ...}]
@@ -162,6 +162,18 @@ pub struct PluginState {
     pub prompt_edit_id: Option<String>,
     pub prompt_name_draft: String,
     pub prompt_content_draft: String,
+
+    // ----- 供应商编辑态 -----
+    /// 编辑中的供应商 id（None 表示新建）
+    pub provider_edit_id: Option<String>,
+    pub provider_name_draft: String,
+    pub provider_baseurl_draft: String,
+    pub provider_apikey_draft: String,
+    /// 模型草稿，每行一个模型名
+    pub provider_models_draft: String,
+
+    // ----- 授权刷新 loading -----
+    pub auth_refreshing: bool,
 
     // ----- 空态问候（随机抽取后缓存，避免重渲染时闪烁） -----
     pub greeting: String,
@@ -210,6 +222,12 @@ pub fn with_state<R>(f: impl FnOnce(&mut PluginState) -> R) -> R {
             prompt_edit_id: None,
             prompt_name_draft: String::new(),
             prompt_content_draft: String::new(),
+            provider_edit_id: None,
+            provider_name_draft: String::new(),
+            provider_baseurl_draft: String::new(),
+            provider_apikey_draft: String::new(),
+            provider_models_draft: String::new(),
+            auth_refreshing: false,
             greeting: String::new(),
             greeting_hint: String::new(),
             render_tick: 0,
@@ -302,6 +320,12 @@ pub fn clear_activation() {
         s.prompt_edit_id = None;
         s.prompt_name_draft.clear();
         s.prompt_content_draft.clear();
+        s.provider_edit_id = None;
+        s.provider_name_draft.clear();
+        s.provider_baseurl_draft.clear();
+        s.provider_apikey_draft.clear();
+        s.provider_models_draft.clear();
+        s.auth_refreshing = false;
         s.greeting.clear();
         s.greeting_hint.clear();
         s.render_tick = s.render_tick.wrapping_add(1);
@@ -536,7 +560,7 @@ pub fn set_files_loading(loading: bool) {
     with_state(|s| s.files_loading = loading);
 }
 
-pub fn set_file_preview(preview: Option<(String, String)>) {
+pub fn set_file_preview(preview: Option<(String, String, String, bool)>) {
     with_state(|s| {
         s.file_preview = preview;
         s.render_tick = s.render_tick.wrapping_add(1);
@@ -575,17 +599,71 @@ pub fn set_prompt_content_draft(text: &str) {
     with_state(|s| s.prompt_content_draft = text.to_string());
 }
 
+// ========== 供应商编辑态 ==========
+
+/// 进入供应商编辑态（id=None 为新建）
+pub fn begin_provider_edit(
+    id: Option<String>,
+    name: &str,
+    base_url: &str,
+    api_key: &str,
+    models: &[String],
+) {
+    with_state(|s| {
+        s.provider_edit_id = id;
+        s.provider_name_draft = name.to_string();
+        s.provider_baseurl_draft = base_url.to_string();
+        s.provider_apikey_draft = api_key.to_string();
+        s.provider_models_draft = models.join("\n");
+        s.render_tick = s.render_tick.wrapping_add(1);
+    });
+}
+
+pub fn set_provider_name_draft(text: &str) {
+    with_state(|s| s.provider_name_draft = text.to_string());
+}
+pub fn set_provider_baseurl_draft(text: &str) {
+    with_state(|s| s.provider_baseurl_draft = text.to_string());
+}
+pub fn set_provider_apikey_draft(text: &str) {
+    with_state(|s| s.provider_apikey_draft = text.to_string());
+}
+pub fn set_provider_models_draft(text: &str) {
+    with_state(|s| s.provider_models_draft = text.to_string());
+}
+
+/// 退出供应商编辑态
+pub fn end_provider_edit() {
+    with_state(|s| {
+        s.provider_edit_id = None;
+        s.provider_name_draft.clear();
+        s.provider_baseurl_draft.clear();
+        s.provider_apikey_draft.clear();
+        s.provider_models_draft.clear();
+        s.render_tick = s.render_tick.wrapping_add(1);
+    });
+}
+
+// ========== 授权刷新 loading ==========
+
+pub fn set_auth_refreshing(loading: bool) {
+    with_state(|s| {
+        s.auth_refreshing = loading;
+        s.render_tick = s.render_tick.wrapping_add(1);
+    });
+}
+
 // ========== 空态随机问候 ==========
 
-/// 主问候语池
+/// 主问候语池（通用文案，不出现产品名）
 const GREETINGS: &[&str] = &[
-    "你好，我是 Eclipse",
+    "你好，很高兴见到你",
     "今天想聊点什么？",
     "有什么我可以帮你的？",
     "随时准备好回答你的问题",
-    "很高兴见到你",
     "来一起探索点有趣的吧",
     "新的对话，从这里开始",
+    "愿你今天也一切顺利",
 ];
 
 /// 副提示语池
