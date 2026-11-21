@@ -278,7 +278,8 @@ fn build_session_list() -> ui::Element {
         .child(header);
 
     if sessions.is_empty() {
-        // 空列表：标准 AI 软件式欢迎页
+        // 空列表：标准 AI 软件式欢迎页（问候语随机抽取并缓存）
+        let (greeting, hint) = state::ensure_greeting();
         let welcome = ui::Element::new(ui::ElementType::Div, None)
             .flex()
             .flex_direction(ui::FlexDirection::Column)
@@ -287,12 +288,12 @@ fn build_session_list() -> ui::Element {
             .gap(12)
             .padding_top(80)
             .child(
-                ui::Element::new(ui::ElementType::P, Some("你好，我是 Eclipse"))
+                ui::Element::new(ui::ElementType::P, Some(&greeting))
                     .size(24)
                     .text_color(COLOR_TEXT_PRIMARY),
             )
             .child(
-                ui::Element::new(ui::ElementType::P, Some("问我任何问题，或开始一段新对话"))
+                ui::Element::new(ui::ElementType::P, Some(&hint))
                     .size(14)
                     .text_color(COLOR_TEXT_SECONDARY),
             )
@@ -485,6 +486,7 @@ fn build_message_scroll() -> ui::Element {
 
 /// 对话内空消息欢迎卡
 fn build_chat_welcome() -> ui::Element {
+    let (greeting, hint) = state::ensure_greeting();
     ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Column)
@@ -493,12 +495,12 @@ fn build_chat_welcome() -> ui::Element {
         .gap(10)
         .padding_top(60)
         .child(
-            ui::Element::new(ui::ElementType::P, Some("开始对话"))
+            ui::Element::new(ui::ElementType::P, Some(&greeting))
                 .size(20)
                 .text_color(COLOR_TEXT_PRIMARY),
         )
         .child(
-            ui::Element::new(ui::ElementType::P, Some("在下方输入消息，回复会实时显示并同步回手表"))
+            ui::Element::new(ui::ElementType::P, Some(&hint))
                 .size(13)
                 .text_color(COLOR_TEXT_MUTED),
         )

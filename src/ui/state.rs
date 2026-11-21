@@ -163,6 +163,10 @@ pub struct PluginState {
     pub prompt_name_draft: String,
     pub prompt_content_draft: String,
 
+    // ----- 空态问候（随机抽取后缓存，避免重渲染时闪烁） -----
+    pub greeting: String,
+    pub greeting_hint: String,
+
     /// 渲染计数（调试/统计用）
     pub render_tick: u64,
 }
@@ -206,6 +210,8 @@ pub fn with_state<R>(f: impl FnOnce(&mut PluginState) -> R) -> R {
             prompt_edit_id: None,
             prompt_name_draft: String::new(),
             prompt_content_draft: String::new(),
+            greeting: String::new(),
+            greeting_hint: String::new(),
             render_tick: 0,
         })
     });
@@ -296,6 +302,8 @@ pub fn clear_activation() {
         s.prompt_edit_id = None;
         s.prompt_name_draft.clear();
         s.prompt_content_draft.clear();
+        s.greeting.clear();
+        s.greeting_hint.clear();
         s.render_tick = s.render_tick.wrapping_add(1);
     });
     persist::delete_config();
@@ -565,4 +573,43 @@ pub fn set_prompt_name_draft(text: &str) {
 
 pub fn set_prompt_content_draft(text: &str) {
     with_state(|s| s.prompt_content_draft = text.to_string());
+}
+
+// ========== 空态随机问候 ==========
+
+/// 主问候语池
+const GREETINGS: &[&str] = &[
+    "你好，我是 Eclipse",
+    "今天想聊点什么？",
+    "有什么我可以帮你的？",
+    "随时准备好回答你的问题",
+    "很高兴见到你",
+    "来一起探索点有趣的吧",
+    "新的对话，从这里开始",
+];
+
+/// 副提示语池
+const GREETING_HINTS: &[&str] = &[
+    "问我任何问题，或开始一段新对话",
+    "在下方输入消息即可开始",
+    "支持切换供应商与模型",
+    "对话记录会自动同步回手表",
+    "换个供应商，换种回答风格",
+];
+
+/// 取随机问候：首次调用时按纳秒时间戳抽取并缓存，之后保持稳定不闪烁
+pub fn ensure_greeting() -> (String, String) {
+    with_state(|s| {
+        if s.greeting.is_empty() {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0) as usize;
+            s.greeting = GREETINGS[nanos % GREETINGS.len()].to_string();
+            // 位移打散，避免主副文案下标总是同余
+            s.greeting_hint =
+                GREETING_HINTS[(nanos.wrapping_mul(7) >> 8) % GREETING_HINTS.len()].to_string();
+        }
+        (s.greeting.clone(), s.greeting_hint.clone())
+    })
 }
