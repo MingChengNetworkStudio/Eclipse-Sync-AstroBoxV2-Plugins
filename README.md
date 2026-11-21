@@ -44,6 +44,7 @@ AstroBox V2 插件，为手表快应用 [Eclipse](https://docs.b4qaq.cn/docs/ecl
 
 - APIKey 脱敏显示，点击切换显隐
 - 账户余额：usedAmount/totalAmount 大字号展示 + 进度条，计费模式/到期时间等附加字段
+- 充值入口：2 元 / 5 元 / 10 元 / 25 元四档（planOrder 1-4），点击打开对应支付页
 - AI 中转用量：总调用/费用/输入输出 Tokens 指标网格 + 分模型明细卡（`/api/v2/ai/v1/usage`）
 - 设备信息、刷新授权（后台执行带 loading）、撤销授权（二次确认）
 - 帮助文档、QQ 交流群、构建信息（原关于页已并入此 Tab）

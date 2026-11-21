@@ -1,7 +1,7 @@
 {
     "name": "Eclipse同步器",
     "icon": "icon.png",
-    "version": "1.7.1",
+    "version": "1.7.2",
     "description": "Eclipse 快应用激活、本地流式聊天与用量同步",
     "author": "B4QAQ",
     "website": "https://docs.b4qaq.cn/docs/eclipse/",

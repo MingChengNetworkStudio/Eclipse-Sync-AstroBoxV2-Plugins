@@ -75,6 +75,7 @@ pub const AI_PROMPT_CONTENT_INPUT: &str = "ai:prompt_content_input";
 pub const SET_REFRESH_AUTH_EVENT: &str = "set:refresh_auth";
 pub const SET_TOGGLE_KEY_EVENT: &str = "set:toggle_key";
 pub const SET_REVOKE_EVENT: &str = "set:revoke";
+pub const SET_RECHARGE_PREFIX: &str = "set:recharge:";
 
 // 关于（并入设置页）
 pub const OPEN_HELP_DOC_EVENT: &str = "open_help_doc";
@@ -266,6 +267,12 @@ pub async fn ui_event_processor(
         if let Ok(idx) = idx_str.parse::<usize>() {
             state::remove_provider_model(idx);
             rerender();
+        }
+        return;
+    }
+    if let Some(order_str) = event_id.strip_prefix(SET_RECHARGE_PREFIX) {
+        if let Ok(order) = order_str.parse::<u8>() {
+            activation::open_recharge(order).await;
         }
         return;
     }

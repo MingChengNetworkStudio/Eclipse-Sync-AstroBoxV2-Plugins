@@ -287,6 +287,39 @@ pub async fn refresh_auth_info() {
     });
 }
 
+/// 充值档位：planOrder → 金额（元），与手表 user.ux 的 planOrder 约定一致
+pub const RECHARGE_PLANS: [(u8, u8); 4] = [(1, 2), (2, 5), (3, 10), (4, 25)];
+
+/// 打开充值页：URL 与手表 user.ux 的 payQR 完全一致（data 末位固定为 1）
+pub async fn open_recharge(plan_order: u8) {
+    // 设备信息缺失时先尝试补拉，仍失败则提示
+    if state::with_state(|s| s.device_info.is_none()) {
+        ensure_device_info().await;
+    }
+
+    let Some(url) = build_recharge_url(plan_order) else {
+        show_alert("无法充值", "设备信息缺失，请确认手表已连接后重试").await;
+        return;
+    };
+    dialog::open_url(&url);
+}
+
+/// 拼接充值 URL：verify/Eclipse?data=product.deviceId.serial.1&planOrder=N
+fn build_recharge_url(plan_order: u8) -> Option<String> {
+    let info = state::with_state(|s| s.device_info.clone())?;
+    let product = info.get("product")?.as_str()?;
+    let device_id = info.get("deviceId")?.as_str()?;
+    let serial = info.get("serial")?.as_str()?;
+    // 与手表端一致，data 第四段固定为 1（非时间戳）
+    let raw = format!("{}.{}.{}.1", product, device_id, serial);
+    Some(format!(
+        "{}/api/v2/verify/Eclipse?data={}&planOrder={}",
+        API_BASE_URL,
+        encode(&raw),
+        plan_order
+    ))
+}
+
 // ========== 辅助函数 ==========
 
 /// 拼接 verify/verifyCheck 的 data 参数：`product.deviceId.serial.unix秒` 并 URL 编码

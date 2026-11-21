@@ -1159,6 +1159,7 @@ fn build_settings_tab() -> ui::Element {
         .child(section_title("授权状态"))
         .child(build_apikey_card())
         .child(build_balance_card())
+        .child(build_recharge_card())
         .child(build_relay_usage_card())
         .child(build_device_info_card())
         .child(build_refresh_auth_button())
@@ -1321,6 +1322,44 @@ fn build_balance_card() -> ui::Element {
         }
     }
     card
+}
+
+/// 充值入口卡：2 列金额 tab，点击打开对应 planOrder 支付页
+fn build_recharge_card() -> ui::Element {
+    let mut grid = ui::Element::new(ui::ElementType::Grid, None)
+        .width_full()
+        .grid_template_columns("repeat(2, minmax(0, 1fr))")
+        .gap(8);
+
+    for (order, amount) in crate::ui::activation::RECHARGE_PLANS {
+        let label = format!("{} 元", amount);
+        grid = grid.child(
+            ui::Element::new(ui::ElementType::Button, Some(&label))
+                .without_default_styles()
+                .padding_top(14)
+                .padding_bottom(14)
+                .radius(10)
+                .bg(COLOR_CARD_BG_2)
+                .text_color(COLOR_TEXT_PRIMARY)
+                .size(15)
+                .on(
+                    ui::Event::Click,
+                    &format!("{}{}", SET_RECHARGE_PREFIX, order),
+                ),
+        );
+    }
+
+    ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .width_full()
+        .gap(8)
+        .bg(COLOR_CARD_BG)
+        .radius(12)
+        .padding(14)
+        .child(section_text("充值余额"))
+        .child(detail_text("点击金额在浏览器完成支付，到账后返回刷新授权"))
+        .child(grid)
 }
 
 /// AI 中转用量卡：汇总网格 + 分模型小卡
