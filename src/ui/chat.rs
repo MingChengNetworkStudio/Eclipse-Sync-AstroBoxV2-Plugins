@@ -470,11 +470,16 @@ pub async fn send_message() {
         headers.insert("Authorization".to_string(), format!("Bearer {}", bearer));
     }
 
+    // AI 设定内容必须在锁外取：prompt_content_by_id 内部也会 with_state，
+    // 嵌套加锁会触发 std::Mutex 重入死锁（表现为宿主杀进程/闪退）
+    let prompt_id = state::with_state(|s| s.selected_prompt_id.clone());
+    let prompt_content = state::prompt_content_by_id(&prompt_id);
+
     // 历史消息只保留 role/content，与手表 chat.ux 的请求形态一致；
     // 若会话选择了 AI 设定，在最前面注入 system 消息
     let history: Vec<Value> = state::with_state(|s| {
         let mut out: Vec<Value> = Vec::new();
-        if let Some(content) = state::prompt_content_by_id(&s.selected_prompt_id) {
+        if let Some(content) = prompt_content.as_deref() {
             if !content.trim().is_empty() {
                 out.push(json!({ "role": "system", "content": content }));
             }

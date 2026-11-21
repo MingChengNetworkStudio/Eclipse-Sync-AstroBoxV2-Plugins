@@ -189,6 +189,12 @@ pub struct PluginState {
 
 static STATE: OnceLock<Mutex<PluginState>> = OnceLock::new();
 
+/// 全局状态访问入口。
+///
+/// # 警告：闭包内禁止调用任何内部也会 `with_state` 的函数
+/// `std::sync::Mutex` 不可重入，同一线程在持锁期间再次加锁会永久死锁，
+/// 宿主看门狗超时后将杀死插件（表现为 AstroBox 闪退）。
+/// 需要多步取值时，先在锁外分别调用本函数取出数据，再进另一个闭包使用。
 pub fn with_state<R>(f: impl FnOnce(&mut PluginState) -> R) -> R {
     let mutex = STATE.get_or_init(|| {
         Mutex::new(PluginState {

@@ -105,7 +105,7 @@ dependencies = [
 
 [[package]]
 name = "eclipse_sync_astrobox_v2_plugin"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "astrobox-ng-wit",
  "base64",
