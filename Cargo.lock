@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "eclipse_sync_astrobox_v2_plugin"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "astrobox-ng-wit",
  "flate2",

@@ -86,9 +86,20 @@ fn parse_message(payload: &str) -> ParsedMessage {
     }
 }
 
-/// 处理快应用消息：拆信封后交给协议层兑现等待槽
+/// 处理快应用消息：拆信封后按 pending 登记驱动对应流程
 pub async fn handle_interconnect_message(payload: &str) {
-    let parsed = parse_message(payload);
+    let mut parsed = parse_message(payload);
+
+    // 兜底：个别宿主回执可能不带 addr/pkgName，用第一台设备与固定包名补齐，
+    // 与发送请求时的来源保持一致，pending 键仍可匹配（对齐 Eternal 的宽松处理）
+    if parsed.addr.is_empty() {
+        if let Some(addr) = state::first_device_addr() {
+            parsed.addr = addr;
+        }
+    }
+    if parsed.pkg_name.is_empty() {
+        parsed.pkg_name = state::PKG_NAME.to_string();
+    }
     if parsed.addr.is_empty() || parsed.pkg_name.is_empty() {
         tracing::warn!("丢弃无法定位来源(addr/pkg)的互联消息");
         return;
@@ -102,13 +113,32 @@ pub async fn handle_interconnect_message(payload: &str) {
     let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
     let status = msg.get("status").and_then(|v| v.as_str()).unwrap_or("OK");
     let data = msg.get("data").cloned();
-
     if msg_type.is_empty() {
         return;
     }
 
-    if !protocol::resolve(&parsed.addr, msg_type, status, data) {
+    // 取出该回执对应的待处理请求；无人等待则忽略
+    let Some(kind) = protocol::take_pending(&parsed.addr, msg_type) else {
         tracing::info!("收到无人等待的消息类型: {}", msg_type);
+        return;
+    };
+
+    let ok = status.is_empty() || status == "OK";
+    match kind {
+        protocol::PendingKind::ActApikey => {
+            activation::on_apikey_reply(ok, status, data).await;
+        }
+        protocol::PendingKind::ActDeviceInfo => {
+            activation::on_device_info_reply(ok, status, data).await;
+        }
+        protocol::PendingKind::PutSettings => {
+            if !ok {
+                tracing::warn!("PUT_SETTINGS 失败: {}", status);
+            }
+        }
+        other => {
+            chat::dispatch_reply(other, ok, status, data).await;
+        }
     }
 }
 

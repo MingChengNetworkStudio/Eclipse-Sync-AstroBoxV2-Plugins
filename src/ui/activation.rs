@@ -1,5 +1,8 @@
 //! 激活流程：从手表读取 Key/设备信息 → 铭诚 API verifyCheck 校验 → 下发 Key 回手表。
-//! 流程与永昼天气同步器一致，appname 固定为 Eclipse。
+//!
+//! 与永昼天气同步器同款事件驱动模型：发起互联请求后立即返回，
+//! 回执由 `event_handler` 分发到本模块的 on_*_reply 继续状态机，
+//! 绝不在事件任务里阻塞等待互联回执。
 
 use std::collections::HashMap;
 
@@ -12,7 +15,7 @@ use crate::ui::build::rerender;
 use crate::ui::protocol;
 use crate::ui::state::{self, VerificationStatus, API_BASE_URL, RELAY_BASE_URL};
 
-/// 激活入口：先问手表要 Key，没有再走设备信息 + 付款/免费激活
+/// 激活入口：记录设备后发起 GET_APIKEY，回执到达时继续
 pub async fn start_activation() {
     state::set_verification_status(VerificationStatus::CheckingDevice);
     rerender();
@@ -25,52 +28,76 @@ pub async fn start_activation() {
         return;
     };
     state::set_host_device(&name, &addr);
+
+    state::set_verification_status(VerificationStatus::GettingInfo);
     rerender();
 
-    // 手表上可能已有 Key（如之前在快应用内激活过）
-    match protocol::get_apikey().await {
-        Ok(key) if !key.trim().is_empty() => {
-            let masked = mask_api_key(key.trim());
-            let use_key = show_confirm(
-                "检测到设备Key",
-                &format!("设备上已存在授权 Key：\n{}\n\n是否使用该 Key？", masked),
-                "重新验证",
-                "使用",
-            )
-            .await;
-            if use_key {
-                activate_with_key(key.trim()).await;
-                return;
-            }
-            // 用户选择重新验证：走设备信息流程
-            request_device_info().await;
-        }
-        Ok(_) => request_device_info().await,
-        Err(err) => {
-            state::set_verification_status(VerificationStatus::Failed);
-            rerender();
-            show_alert("激活失败", &err).await;
-        }
+    if let Err(err) = protocol::request_apikey().await {
+        state::set_verification_status(VerificationStatus::Failed);
+        rerender();
+        show_alert("激活失败", &err).await;
     }
 }
 
-/// 向手表请求设备信息，成功后进入等待付款状态
+/// GET_APIKEY 回执处理
+pub async fn on_apikey_reply(ok: bool, status: &str, data: Option<serde_json::Value>) {
+    if !ok {
+        tracing::warn!("GET_APIKEY 回执失败: {}", status);
+        // 手表报错时仍尝试走设备信息激活流程
+        request_device_info().await;
+        return;
+    }
+
+    let key = data
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default();
+
+    if key.trim().is_empty() {
+        // 手表没有 Key，进入设备信息 + 付款/免费激活流程
+        request_device_info().await;
+        return;
+    }
+
+    // 手表上已有 Key（如之前在快应用内激活过），询问是否直接采用
+    let masked = mask_api_key(key.trim());
+    let use_key = show_confirm(
+        "检测到设备Key",
+        &format!("设备上已存在授权 Key：\n{}\n\n是否使用该 Key？", masked),
+        "重新验证",
+        "使用",
+    )
+    .await;
+    if use_key {
+        activate_with_key(key.trim()).await;
+    } else {
+        request_device_info().await;
+    }
+}
+
+/// 发起 GET_DEVICEINFO
 async fn request_device_info() {
     state::set_verification_status(VerificationStatus::GettingInfo);
     rerender();
 
-    match protocol::get_device_info().await {
-        Ok(info) => {
-            state::set_device_info(Some(info));
-            state::set_verification_status(VerificationStatus::WaitingPayment);
-            rerender();
-        }
-        Err(err) => {
-            state::set_verification_status(VerificationStatus::Failed);
-            rerender();
-            show_alert("获取设备信息失败", &err).await;
-        }
+    if let Err(err) = protocol::request_device_info().await {
+        state::set_verification_status(VerificationStatus::Failed);
+        rerender();
+        show_alert("获取设备信息失败", &err).await;
     }
+}
+
+/// GET_DEVICEINFO 回执处理
+pub async fn on_device_info_reply(ok: bool, status: &str, data: Option<serde_json::Value>) {
+    if !ok {
+        state::set_verification_status(VerificationStatus::Failed);
+        rerender();
+        show_alert("获取设备信息失败", status).await;
+        return;
+    }
+
+    state::set_device_info(data);
+    state::set_verification_status(VerificationStatus::WaitingPayment);
+    rerender();
 }
 
 /// 打开浏览器进入支付/激活页面
@@ -99,7 +126,7 @@ pub async fn verify_payment(free: bool) {
         return;
     };
 
-    // verifyCheck 为无鉴权 GET，业务状态码在响应体的 status 字段里
+    // verifyCheck 为插件自身发起的无鉴权 HTTP，可直接 await（WASI 调用会驱动事件循环）
     let headers = HashMap::new();
     match api_client::get_json(&url, &headers) {
         Ok(body) => {
@@ -131,7 +158,7 @@ pub async fn verify_payment(free: bool) {
 async fn activate_with_key(api_key: &str) {
     state::set_api_key(api_key);
 
-    // 把 Key 写回手表设置，保证快应用内同样处于已激活状态
+    // 把 Key 写回手表设置（发起后不等回执，PUT_SETTINGS_DONE 仅记录）
     if let Err(err) = protocol::put_settings(json!({ "APIKey": api_key })).await {
         tracing::warn!("下发 APIKey 到手表失败: {}", err);
     }
@@ -140,9 +167,11 @@ async fn activate_with_key(api_key: &str) {
     rerender();
     show_alert("成功", "验证成功！").await;
 
-    // 后台拉取余额与 AI 用量，失败只记录不阻断
-    fetch_get_info().await;
-    fetch_relay_usage().await;
+    // 后台拉取余额与 AI 用量，网络超时不阻塞交互
+    astrobox_ng_wit::spawn(async move {
+        fetch_get_info().await;
+        fetch_relay_usage().await;
+    });
 }
 
 /// 激活失败：回到等待付款状态，允许重试
@@ -278,7 +307,7 @@ async fn show_alert(title: &str, message: &str) {
     .await;
 }
 
-/// 双按钮确认框，返回是否点击主按钮（primary_id 对应的按钮）
+/// 双按钮确认框，返回是否点击主按钮
 async fn show_confirm(
     title: &str,
     message: &str,

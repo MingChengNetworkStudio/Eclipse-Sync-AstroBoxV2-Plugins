@@ -1,7 +1,8 @@
 //! 聊天功能：会话与消息的拉取/同步、供应商切换、直连供应商的流式对话。
 //!
-//! 对话路径：插件直连供应商 OpenAI 兼容 `/chat/completions`（stream=true），
-//! delta 实时写入 state 并节流渲染；完成后用 PUT_MESSAGES 把两条消息写回手表。
+//! 互联读写全部为事件驱动：UI 动作只负责发起请求，回执到达后由
+//! `event_handler` 调用本模块的 on_*_reply 继续，避免阻塞宿主事件循环。
+//! 对话本身走插件直连供应商的 SSE（WASI HTTP），不经过互联通道。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -10,12 +11,12 @@ use serde_json::{json, Value};
 
 use crate::ui::api_client;
 use crate::ui::build::rerender;
-use crate::ui::protocol;
+use crate::ui::protocol::{self, PendingKind};
 use crate::ui::state;
 
 /// 流式取消标记（同一时刻只允许一个对话任务）
 static CHAT_CANCEL: AtomicBool = AtomicBool::new(false);
-/// 流式渲染最小间隔（ms），避免 delta 过密拖垮手表 UI
+/// 流式渲染最小间隔（ms），避免 delta 过密拖垮 UI
 const STREAM_RENDER_INTERVAL_MS: u128 = 150;
 /// 对话请求连接超时
 const CHAT_TIMEOUT_MS: u32 = 30_000;
@@ -54,36 +55,27 @@ pub fn session_updated_at(session: &Value) -> i64 {
         .unwrap_or(0)
 }
 
-// ========== 会话列表 ==========
+// ========== 会话列表（发起） ==========
 
 /// 从手表拉取会话列表
 pub async fn refresh_sessions() {
     state::set_sessions_loading(true);
     rerender();
-    match protocol::get_session_list().await {
-        Ok(list) => state::set_sessions(list),
-        Err(err) => {
-            state::set_sessions_loading(false);
-            rerender();
-            show_alert("加载会话失败", &err).await;
-        }
+    if let Err(err) = protocol::refresh_sessions().await {
+        state::set_sessions_loading(false);
+        rerender();
+        show_alert("加载会话失败", &err).await;
     }
-    rerender();
 }
 
-/// 新建会话并直接打开
+/// 新建会话（回执到达后自动打开）
 pub async fn new_session() {
-    match protocol::create_session("").await {
-        Ok(session) => {
-            let id = session_id(&session);
-            refresh_sessions().await;
-            open_session_by_id(&id).await;
-        }
-        Err(err) => show_alert("新建会话失败", &err).await,
+    if let Err(err) = protocol::create_session("").await {
+        show_alert("新建会话失败", &err).await;
     }
 }
 
-/// 删除会话（二次确认）。若删除的是当前打开的会话，自动退回列表
+/// 删除会话（二次确认）
 pub async fn delete_session(idx: usize) {
     let target = state::with_state(|s| s.sessions.get(idx).cloned());
     let Some(session) = target else {
@@ -92,51 +84,21 @@ pub async fn delete_session(idx: usize) {
     let id = session_id(&session);
     let title = session_title(&session);
 
-    let confirmed = show_confirm("删除会话", &format!("确定删除「{}」？", title)).await;
-    if !confirmed {
+    if !show_confirm("删除会话", &format!("确定删除「{}」？", title)).await {
         return;
     }
-
-    match protocol::delete_session(&id).await {
-        Ok(()) => {
-            let is_current = state::current_session_id().as_deref() == Some(id.as_str());
-            if is_current {
-                state::close_session();
-            }
-            refresh_sessions().await;
-        }
-        Err(err) => show_alert("删除失败", &err).await,
+    if let Err(err) = protocol::delete_session(&id).await {
+        show_alert("删除失败", &err).await;
     }
 }
 
-/// 打开会话：读取最新分块（chunk=0，约 20 条）
+/// 打开会话：发起 GET_SESSION 读取最新分块（chunk=0）
 pub async fn open_session(idx: usize) {
     let id = state::with_state(|s| s.sessions.get(idx).map(session_id));
     if let Some(id) = id {
-        open_session_by_id(&id).await;
-    }
-}
-
-async fn open_session_by_id(id: &str) {
-    state::set_messages_loading(true);
-    rerender();
-
-    match protocol::get_session(id, 0).await {
-        Ok(detail) => {
-            let messages = detail
-                .get("messages")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let older = detail
-                .get("olderChunks")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            state::set_messages_loading(false);
-            state::open_session(id, messages, older);
-            rerender();
-        }
-        Err(err) => {
+        state::set_messages_loading(true);
+        rerender();
+        if let Err(err) = protocol::request_session(&id, 0).await {
             state::set_messages_loading(false);
             rerender();
             show_alert("打开会话失败", &err).await;
@@ -144,7 +106,7 @@ async fn open_session_by_id(id: &str) {
     }
 }
 
-/// 加载更早的消息分块（chunk 下标在 state 中维护）
+/// 加载更早的消息分块
 pub async fn load_older() {
     let Some(id) = state::current_session_id() else {
         return;
@@ -155,27 +117,10 @@ pub async fn load_older() {
     let chunk = state::with_state(|s| s.next_chunk);
     state::set_messages_loading(true);
     rerender();
-
-    match protocol::get_session(&id, chunk).await {
-        Ok(detail) => {
-            let older_messages = detail
-                .get("messages")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let remaining = detail
-                .get("olderChunks")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            state::set_messages_loading(false);
-            state::prepend_older_messages(older_messages, remaining);
-            rerender();
-        }
-        Err(err) => {
-            state::set_messages_loading(false);
-            rerender();
-            show_alert("加载更早消息失败", &err).await;
-        }
+    if let Err(err) = protocol::request_session(&id, chunk).await {
+        state::set_messages_loading(false);
+        rerender();
+        show_alert("加载更早消息失败", &err).await;
     }
 }
 
@@ -185,22 +130,117 @@ pub fn back_to_list() {
     rerender();
 }
 
+// ========== 会话/消息回执处理 ==========
+
+/// SESSION_LIST 回执
+pub async fn on_session_list_reply(ok: bool, status: &str, data: Option<Value>) {
+    state::set_sessions_loading(false);
+    if !ok {
+        rerender();
+        show_alert("加载会话失败", status).await;
+        return;
+    }
+    let list = data.and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    state::set_sessions(list);
+    rerender();
+}
+
+/// PUT_SESSION_CREATE_DONE 回执：刷新列表并打开新会话
+pub async fn on_session_created_reply(ok: bool, status: &str, data: Option<Value>) {
+    if !ok {
+        show_alert("新建会话失败", status).await;
+        return;
+    }
+    let id = data.map(|d| session_id(&d)).unwrap_or_default();
+    if id.is_empty() {
+        show_alert("新建会话失败", "回执缺少会话 id").await;
+        return;
+    }
+    refresh_sessions().await;
+    state::set_messages_loading(true);
+    rerender();
+    if let Err(err) = protocol::request_session(&id, 0).await {
+        state::set_messages_loading(false);
+        rerender();
+        show_alert("打开会话失败", &err).await;
+    }
+}
+
+/// DEL_SESSION_DONE 回执
+pub async fn on_session_deleted_reply(deleted_id: &str, ok: bool, status: &str) {
+    if !ok {
+        show_alert("删除失败", status).await;
+        return;
+    }
+    let is_current = state::current_session_id().as_deref() == Some(deleted_id);
+    if is_current {
+        state::close_session();
+    }
+    refresh_sessions().await;
+}
+
+/// SESSION 回执：chunk=0 打开会话，chunk>0 前插更早消息
+pub async fn on_session_reply(
+    session_id: &str,
+    chunk: usize,
+    ok: bool,
+    status: &str,
+    data: Option<Value>,
+) {
+    state::set_messages_loading(false);
+    if !ok {
+        rerender();
+        show_alert("读取会话失败", status).await;
+        return;
+    }
+
+    let detail = data.unwrap_or(Value::Null);
+    let messages = detail
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let older = detail
+        .get("olderChunks")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    if chunk == 0 {
+        state::open_session(session_id, messages, older);
+    } else {
+        state::prepend_older_messages(messages, older);
+    }
+    rerender();
+}
+
+/// PUT_MESSAGES_DONE 回执：同步失败时提示（本地消息仍保留）
+pub async fn on_messages_put_reply(_session_id: &str, ok: bool, status: &str) {
+    if !ok {
+        show_alert("同步失败", &format!("写回手表失败: {}", status)).await;
+    }
+}
+
+/// PUT_SESSION_UPDATE_DONE 回执：自动改名后刷新列表
+pub async fn on_session_updated_reply(_session_id: &str, ok: bool, _status: &str) {
+    if ok {
+        let _ = protocol::refresh_sessions().await;
+    }
+}
+
 // ========== 供应商 ==========
 
 /// 拉取手表供应商列表与当前生效供应商
 pub async fn refresh_providers() {
-    match protocol::get_providers().await {
-        Ok((customs, active)) => state::set_providers(customs, active),
-        Err(err) => tracing::warn!("加载供应商失败: {}", err),
+    if let Err(err) = protocol::request_providers().await {
+        tracing::warn!("加载供应商失败: {}", err);
     }
-    rerender();
 }
 
 /// 切换激活供应商（同步到手表）。`label` 为 Select 选中的显示名
 pub async fn select_provider_by_label(label: &str) {
     let target_id = state::with_state(|s| {
         if label == "官方中转" {
-            return "official".to_string();
+            return state::OFFICIAL_ID.to_string();
         }
         s.providers
             .iter()
@@ -212,12 +252,34 @@ pub async fn select_provider_by_label(label: &str) {
     if target_id == state::with_state(|s| s.active_provider.id.clone()) {
         return;
     }
-
-    match protocol::set_active_provider(&target_id).await {
-        Ok(active) => state::set_active_provider(active),
-        Err(err) => show_alert("切换供应商失败", &err).await,
+    if let Err(err) = protocol::set_active_provider(&target_id).await {
+        show_alert("切换供应商失败", &err).await;
     }
-    rerender();
+}
+
+/// PROVIDERS 回执
+pub fn on_providers_reply(ok: bool, data: Option<Value>) {
+    if !ok {
+        return;
+    }
+    if let Some(value) = data {
+        let (customs, active) = protocol::parse_providers(&value);
+        state::set_providers(customs, active);
+        rerender();
+    }
+}
+
+/// PUT_PROVIDER_ACTIVE_DONE 回执
+pub fn on_active_provider_reply(ok: bool, data: Option<Value>) {
+    if !ok {
+        return;
+    }
+    if let Some(value) = data {
+        if let Ok(active) = serde_json::from_value::<state::Provider>(value) {
+            state::set_active_provider(active);
+            rerender();
+        }
+    }
 }
 
 // ========== 流式对话 ==========
@@ -249,7 +311,7 @@ pub async fn send_message() {
     // 本地立即上屏用户消息
     let now = state::now_unix_ms() as u64;
     let user_msg = json!({
-        "id": format!("msg_{}_{}", now, &rand_suffix()),
+        "id": format!("msg_{}_{}", now, rand_suffix()),
         "role": "user",
         "content": text,
         "model": model,
@@ -376,7 +438,7 @@ async fn finalize_stream(
     // 组装 assistant 消息并落本地
     let now = state::now_unix_ms() as u64;
     let assistant_msg = json!({
-        "id": format!("msg_{}_{}", now, &rand_suffix()),
+        "id": format!("msg_{}_{}", now, rand_suffix()),
         "role": "assistant",
         "content": full,
         "model": model,
@@ -386,7 +448,7 @@ async fn finalize_stream(
     state::set_sending(false);
     rerender();
 
-    // 同步两条消息到手表（手表会补齐缺失字段并按时间排序落盘）
+    // 同步两条消息到手表（发起式，回执在 on_messages_put_reply 处理）
     if let Err(err) = protocol::put_messages(session_id, vec![user_msg.clone(), assistant_msg]).await
     {
         tracing::warn!("消息同步到手表失败: {}", err);
@@ -395,13 +457,6 @@ async fn finalize_stream(
 
     // 首轮对话自动用首条用户消息给会话改名（手表默认标题为「新会话」）
     maybe_auto_rename(session_id, text).await;
-
-    // 刷新列表以更新 updatedAt 排序
-    protocol::get_session_list()
-        .await
-        .map(state::set_sessions)
-        .ok();
-    rerender();
 }
 
 /// 停止当前流式生成
@@ -431,7 +486,7 @@ async fn maybe_auto_rename(sid: &str, first_text: &str) {
             .find(|sess| session_id(sess) == sid)
             .map(|sess| {
                 let title = session_title(sess);
-                title.is_empty() || title == "新会话" || title == "未命名会话"
+                title == "新会话" || title == "未命名会话"
             })
             .unwrap_or(false)
     });
@@ -455,6 +510,28 @@ fn rand_suffix() -> String {
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
     format!("{:x}", nanos % 0x10000)
+}
+
+// ========== 回执分发入口（event_handler 调用） ==========
+
+/// 按 pending 类型分发互联回执到对应处理函数
+pub async fn dispatch_reply(kind: PendingKind, ok: bool, status: &str, data: Option<Value>) {
+    match kind {
+        PendingKind::SessionList => on_session_list_reply(ok, status, data).await,
+        PendingKind::CreateSession => on_session_created_reply(ok, status, data).await,
+        PendingKind::DeleteSession(id) => on_session_deleted_reply(&id, ok, status).await,
+        PendingKind::OpenSession(id, chunk) => {
+            on_session_reply(&id, chunk, ok, status, data).await
+        }
+        PendingKind::PutMessages(id) => on_messages_put_reply(&id, ok, status).await,
+        PendingKind::UpdateSession(id) => on_session_updated_reply(&id, ok, status).await,
+        PendingKind::Providers => on_providers_reply(ok, data),
+        PendingKind::SetActiveProvider => on_active_provider_reply(ok, data),
+        // 激活相关与纯记录类回执不在此处理
+        PendingKind::ActApikey
+        | PendingKind::ActDeviceInfo
+        | PendingKind::PutSettings => {}
+    }
 }
 
 // ========== 弹窗 ==========

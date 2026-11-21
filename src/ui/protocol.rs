@@ -1,10 +1,12 @@
-//! Eclipse 互联协议客户端：负责拉起快应用、发送 `{type,data}` 请求并等待对应回执。
+//! Eclipse 互联协议客户端：发起 `{type,data}` 请求，回执由事件循环驱动。
 //!
-//! 回执关联方式：以 `(设备地址, 回执类型)` 为键登记等待槽，
-//! `event_handler` 收到消息后调用 [`resolve`] 兑现；调用方用 Condvar 等待结果。
+//! 设计与永昼天气同步器一致：**发送方绝不阻塞等待回执**。
+//! 发送前在 PENDING 表登记请求类型与上下文，回执到达后由
+//! `event_handler` 取出并分发给 activation/chat 的处理函数，
+//! 避免阻塞宿主事件派发导致回执永远无法进入插件。
 
 use std::collections::HashMap;
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use astrobox_ng_wit::astrobox::psys_host_v4::{interconnect, register, thirdpartyapp};
@@ -12,46 +14,96 @@ use serde_json::{json, Value};
 
 use crate::ui::state::{self, Provider, PKG_NAME};
 
-/// 单次请求总超时
-const REQUEST_TIMEOUT_MS: u64 = 15_000;
+/// 拉起快应用后，该时间窗内不再重复 launch/sleep（毫秒）
+const LAUNCH_CACHE_MS: u128 = 10_000;
 /// 拉起快应用后等待其就绪的时间
 const LAUNCH_READY_WAIT_MS: u64 = 2_000;
 
-/// 等待槽：None 表示尚未兑现，Some 表示已收到回执（成功或错误）
-type Slot = Arc<(Mutex<Option<Result<Value, String>>>, Condvar)>;
+/// 待处理请求的类型与上下文，回执到达后据此继续流程
+pub enum PendingKind {
+    /// 激活：GET_APIKEY 的回执
+    ActApikey,
+    /// 激活：GET_DEVICEINFO 的回执
+    ActDeviceInfo,
+    /// PUT_SETTINGS 回执（仅记录）
+    PutSettings,
+    /// GET_SESSION_LIST 回执
+    SessionList,
+    /// PUT_SESSION_CREATE 回执
+    CreateSession,
+    /// DEL_SESSION 回执，携带被删会话 id
+    DeleteSession(String),
+    /// GET_SESSION 回执，携带会话 id 与分块下标（0=打开会话，>0=加载更早）
+    OpenSession(String, usize),
+    /// PUT_MESSAGES 回执，携带会话 id
+    PutMessages(String),
+    /// GET_PROVIDERS 回执
+    Providers,
+    /// PUT_PROVIDER_ACTIVE 回执
+    SetActiveProvider,
+    /// PUT_SESSION_UPDATE 回执，携带会话 id
+    UpdateSession(String),
+}
 
-static PENDING: OnceLock<Mutex<HashMap<String, Slot>>> = OnceLock::new();
+struct PendingEntry {
+    kind: PendingKind,
+    /// 登记时间（ms），用于诊断长时间未兑现的请求
+    _created_ms: u128,
+}
 
-fn pending() -> &'static Mutex<HashMap<String, Slot>> {
+/// 键：`设备地址|回执类型`
+static PENDING: OnceLock<Mutex<HashMap<String, PendingEntry>>> = OnceLock::new();
+/// 各设备最近一次成功拉起快应用的时间（ms），避免连续请求时重复 sleep
+static LAST_LAUNCH: OnceLock<Mutex<HashMap<String, u128>>> = OnceLock::new();
+
+fn pending() -> &'static Mutex<HashMap<String, PendingEntry>> {
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn last_launch() -> &'static Mutex<HashMap<String, u128>> {
+    LAST_LAUNCH.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn slot_key(addr: &str, reply_type: &str) -> String {
     format!("{}|{}", addr, reply_type)
 }
 
-/// 兑现一条回执。返回 true 表示有等待者消费了该消息，false 表示无人等待（忽略）。
-pub fn resolve(addr: &str, reply_type: &str, status: &str, data: Option<Value>) -> bool {
-    let slot = pending()
+/// 登记一条待处理请求（必须在实际发送前调用，防止回执极快到达时丢失）
+fn put_pending(addr: &str, reply_type: &str, kind: PendingKind) {
+    pending()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .remove(&slot_key(addr, reply_type));
-    let Some(slot) = slot else {
-        return false;
-    };
-    let (lock, cvar) = &*slot;
-    let result = if status.is_empty() || status == "OK" {
-        Ok(data.unwrap_or(Value::Null))
-    } else {
-        Err(status.to_string())
-    };
-    *lock.lock().unwrap_or_else(|p| p.into_inner()) = Some(result);
-    cvar.notify_all();
-    true
+        .insert(
+            slot_key(addr, reply_type),
+            PendingEntry {
+                kind,
+                _created_ms: state::now_unix_ms(),
+            },
+        );
 }
 
-/// 拉起 Eclipse 快应用并确认已安装（已在前台时 launch 仍会成功）
+/// 回执到达时取出待处理请求；无人等待返回 None
+pub fn take_pending(addr: &str, reply_type: &str) -> Option<PendingKind> {
+    pending()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&slot_key(addr, reply_type))
+        .map(|entry| entry.kind)
+}
+
+/// 拉起 Eclipse 快应用；短时间内已拉过则跳过（launch 本身幂等）
 async fn ensure_launched(addr: &str) -> Result<(), String> {
+    let now = state::now_unix_ms();
+    let recently_launched = last_launch()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(addr)
+        .map(|t| now.saturating_sub(*t) < LAUNCH_CACHE_MS)
+        .unwrap_or(false);
+    if recently_launched {
+        return Ok(());
+    }
+
     let app_list = thirdpartyapp::get_thirdparty_app_list(addr.to_string())
         .await
         .map_err(|reason| format!("获取设备应用列表失败: {}", reason))?;
@@ -64,30 +116,28 @@ async fn ensure_launched(addr: &str) -> Result<(), String> {
         .await
         .map_err(|reason| format!("启动 Eclipse 失败: {}", reason))?;
     std::thread::sleep(Duration::from_millis(LAUNCH_READY_WAIT_MS));
+
+    last_launch()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(addr.to_string(), state::now_unix_ms());
     Ok(())
 }
 
-/// 发送一条协议请求并等待回执。
-/// - `req_type`：请求 type（如 GET_SESSION_LIST）
-/// - `reply_type`：回执 type（如 SESSION_LIST）
-/// - `data`：可选请求 data
-async fn request(
+/// 发起一条协议请求：拉起应用 → 登记 pending → 注册接收器 → 发送。
+/// 本函数只等待「发送动作」完成，不等待业务回执，回执走事件循环。
+async fn send(
     addr: &str,
     req_type: &str,
     reply_type: &str,
     data: Option<Value>,
-) -> Result<Value, String> {
+    kind: PendingKind,
+) -> Result<(), String> {
     ensure_launched(addr).await?;
 
-    // 登记等待槽
-    let slot: Slot = Arc::new((Mutex::new(None), Condvar::new()));
-    {
-        let mut map = pending().lock().unwrap_or_else(|p| p.into_inner());
-        // 同键旧请求直接替换（正常流程为串行，不会出现并发同键）
-        map.insert(slot_key(addr, reply_type), slot.clone());
-    }
+    // 先登记再注册/发送，杜绝回执早于登记到达的竞态
+    put_pending(addr, reply_type, kind);
 
-    // 注册接收器，失败仅告警（可能此前已注册）
     if let Err(reason) =
         register::register_interconnect_recv(addr.to_string(), PKG_NAME.to_string()).await
     {
@@ -105,149 +155,171 @@ async fn request(
     )
     .await
     {
-        pending()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&slot_key(addr, reply_type));
+        // 发送失败要撤掉登记，避免残留 pending 吞掉后续同类型回执
+        take_pending(addr, reply_type);
         return Err(format!("发送消息失败: {}", reason));
     }
-
-    // Condvar 等待回执，整体超时
-    let deadline = Duration::from_millis(REQUEST_TIMEOUT_MS);
-    let (lock, cvar) = &*slot;
-    let mut guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-    let mut waited = Duration::ZERO;
-    while guard.is_none() {
-        let (g, _timeout) = cvar
-            .wait_timeout(guard, Duration::from_millis(200))
-            .unwrap_or_else(|p| p.into_inner());
-        guard = g;
-        waited += Duration::from_millis(200);
-        if waited >= deadline {
-            break;
-        }
-    }
-
-    match guard.take() {
-        Some(result) => result,
-        None => {
-            pending()
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .remove(&slot_key(addr, reply_type));
-            Err(format!("等待 {} 回执超时", reply_type))
-        }
-    }
+    Ok(())
 }
 
 /// 取第一台已连接设备地址，没有设备时返回友好错误
 async fn require_addr() -> Result<String, String> {
-    state::first_device_addr().ok_or_else(|| "没有已连接的设备，请先在 AstroBox 中连接手表".to_string())
+    state::first_device_addr().ok_or_else(|| {
+        "没有已连接的设备，请先在 AstroBox 中连接手表".to_string()
+    })
 }
 
 // ========== 通用指令 ==========
 
-/// GET_APIKEY → 设备上保存的 APIKey 字符串（可能为空串）
-pub async fn get_apikey() -> Result<String, String> {
+/// 发起 GET_APIKEY，回执 APIKEY 由激活模块处理
+pub async fn request_apikey() -> Result<(), String> {
     let addr = require_addr().await?;
-    let value = request(&addr, "GET_APIKEY", "APIKEY", None).await?;
-    Ok(value.as_str().unwrap_or("").to_string())
+    send(&addr, "GET_APIKEY", "APIKEY", None, PendingKind::ActApikey).await
 }
 
-/// GET_DEVICEINFO → 设备信息对象（product/deviceId/serial 等）
-pub async fn get_device_info() -> Result<Value, String> {
+/// 发起 GET_DEVICEINFO，回执 DEVICEINFO 由激活模块处理
+pub async fn request_device_info() -> Result<(), String> {
     let addr = require_addr().await?;
-    request(&addr, "GET_DEVICEINFO", "DEVICEINFO", None).await
+    send(
+        &addr,
+        "GET_DEVICEINFO",
+        "DEVICEINFO",
+        None,
+        PendingKind::ActDeviceInfo,
+    )
+    .await
 }
 
-/// PUT_SETTINGS：浅合并写入手表设置（如下发 APIKey）
+/// 发起 PUT_SETTINGS（如下发 APIKey），回执仅记录
 pub async fn put_settings(settings: Value) -> Result<(), String> {
     let addr = require_addr().await?;
-    request(&addr, "PUT_SETTINGS", "PUT_SETTINGS_DONE", Some(settings)).await?;
-    Ok(())
+    send(
+        &addr,
+        "PUT_SETTINGS",
+        "PUT_SETTINGS_DONE",
+        Some(settings),
+        PendingKind::PutSettings,
+    )
+    .await
 }
 
 // ========== 会话管理 ==========
 
-/// GET_SESSION_LIST → 会话对象数组
-pub async fn get_session_list() -> Result<Vec<Value>, String> {
+/// 发起 GET_SESSION_LIST
+pub async fn refresh_sessions() -> Result<(), String> {
     let addr = require_addr().await?;
-    let value = request(&addr, "GET_SESSION_LIST", "SESSION_LIST", None).await?;
-    Ok(value.as_array().cloned().unwrap_or_default())
+    send(
+        &addr,
+        "GET_SESSION_LIST",
+        "SESSION_LIST",
+        None,
+        PendingKind::SessionList,
+    )
+    .await
 }
 
-/// PUT_SESSION_CREATE → 新建的会话对象
-pub async fn create_session(title: &str) -> Result<Value, String> {
+/// 发起 PUT_SESSION_CREATE
+pub async fn create_session(title: &str) -> Result<(), String> {
     let addr = require_addr().await?;
     let data = if title.is_empty() {
         json!({})
     } else {
         json!({ "title": title })
     };
-    request(&addr, "PUT_SESSION_CREATE", "PUT_SESSION_CREATE_DONE", Some(data)).await
+    send(
+        &addr,
+        "PUT_SESSION_CREATE",
+        "PUT_SESSION_CREATE_DONE",
+        Some(data),
+        PendingKind::CreateSession,
+    )
+    .await
 }
 
-/// DEL_SESSION：删除会话及其消息分块、工作区
+/// 发起 DEL_SESSION
 pub async fn delete_session(session_id: &str) -> Result<(), String> {
     let addr = require_addr().await?;
-    request(
+    send(
         &addr,
         "DEL_SESSION",
         "DEL_SESSION_DONE",
         Some(json!({ "id": session_id })),
+        PendingKind::DeleteSession(session_id.to_string()),
     )
-    .await?;
-    Ok(())
+    .await
 }
 
-/// PUT_SESSION_UPDATE：更新会话字段（title/webEnabled/searchMode/memory/promptId）
+/// 发起 PUT_SESSION_UPDATE
 pub async fn update_session(session_id: &str, patch: Value) -> Result<(), String> {
     let addr = require_addr().await?;
-    request(
+    send(
         &addr,
         "PUT_SESSION_UPDATE",
         "PUT_SESSION_UPDATE_DONE",
         Some(json!({ "id": session_id, "patch": patch })),
+        PendingKind::UpdateSession(session_id.to_string()),
     )
-    .await?;
-    Ok(())
+    .await
 }
 
-/// GET_SESSION：取某个分块的会话详情与消息
-/// 返回 `{session, messages, chunk, totalChunks, olderChunks}`
-pub async fn get_session(session_id: &str, chunk: usize) -> Result<Value, String> {
+/// 发起 GET_SESSION。chunk=0 表示打开会话，>0 表示加载更早分块
+pub async fn request_session(session_id: &str, chunk: usize) -> Result<(), String> {
     let addr = require_addr().await?;
-    request(
+    send(
         &addr,
         "GET_SESSION",
         "SESSION",
         Some(json!({ "id": session_id, "chunk": chunk })),
+        PendingKind::OpenSession(session_id.to_string(), chunk),
     )
     .await
 }
 
 // ========== 消息管理 ==========
 
-/// PUT_MESSAGES：批量追加消息（手表自动补 id/role/timestamp，同 id 覆盖）
+/// 发起 PUT_MESSAGES，批量追加消息到手表
 pub async fn put_messages(session_id: &str, messages: Vec<Value>) -> Result<(), String> {
     let addr = require_addr().await?;
-    request(
+    send(
         &addr,
         "PUT_MESSAGES",
         "PUT_MESSAGES_DONE",
         Some(json!({ "id": session_id, "messages": messages })),
+        PendingKind::PutMessages(session_id.to_string()),
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 // ========== 供应商管理 ==========
 
-/// GET_PROVIDERS → (自定义供应商列表, 当前生效供应商)
-pub async fn get_providers() -> Result<(Vec<Provider>, Provider), String> {
+/// 发起 GET_PROVIDERS
+pub async fn request_providers() -> Result<(), String> {
     let addr = require_addr().await?;
-    let value = request(&addr, "GET_PROVIDERS", "PROVIDERS", None).await?;
+    send(
+        &addr,
+        "GET_PROVIDERS",
+        "PROVIDERS",
+        None,
+        PendingKind::Providers,
+    )
+    .await
+}
 
+/// 发起 PUT_PROVIDER_ACTIVE
+pub async fn set_active_provider(provider_id: &str) -> Result<(), String> {
+    let addr = require_addr().await?;
+    send(
+        &addr,
+        "PUT_PROVIDER_ACTIVE",
+        "PUT_PROVIDER_ACTIVE_DONE",
+        Some(json!({ "id": provider_id })),
+        PendingKind::SetActiveProvider,
+    )
+    .await
+}
+
+/// 解析 GET_PROVIDERS 回执为 (自定义列表, 当前生效供应商)
+pub fn parse_providers(value: &Value) -> (Vec<Provider>, Provider) {
     let customs = value
         .get("list")
         .and_then(|v| v.as_array())
@@ -258,24 +330,11 @@ pub async fn get_providers() -> Result<(Vec<Provider>, Provider), String> {
         })
         .unwrap_or_default();
 
-    // active 可能是官方中转（id=official）或自定义供应商；解析失败时回落官方占位
+    // active 可能是官方中转（id=official）或自定义供应商；解析失败回落官方占位
     let active = value
         .get("active")
         .and_then(|v| serde_json::from_value::<Provider>(v.clone()).ok())
         .unwrap_or_else(Provider::official);
 
-    Ok((customs, active))
-}
-
-/// PUT_PROVIDER_ACTIVE：切换激活供应商，返回切换后的生效对象
-pub async fn set_active_provider(provider_id: &str) -> Result<Provider, String> {
-    let addr = require_addr().await?;
-    let value = request(
-        &addr,
-        "PUT_PROVIDER_ACTIVE",
-        "PUT_PROVIDER_ACTIVE_DONE",
-        Some(json!({ "id": provider_id })),
-    )
-    .await?;
-    Ok(serde_json::from_value::<Provider>(value).unwrap_or_else(|_| Provider::official()))
+    (customs, active)
 }
