@@ -6,6 +6,8 @@ use serde_json::Value;
 use crate::ui::activation;
 use crate::ui::build::rerender;
 use crate::ui::chat;
+use crate::ui::files;
+use crate::ui::prompts;
 use crate::ui::protocol;
 use crate::ui::state::{self, MainTab};
 
@@ -13,8 +15,9 @@ use crate::ui::state::{self, MainTab};
 
 // Tab 切换
 pub const TAB_CHAT_EVENT: &str = "tab_chat";
+pub const TAB_FILES_EVENT: &str = "tab_files";
+pub const TAB_AI_EVENT: &str = "tab_ai";
 pub const TAB_SETTINGS_EVENT: &str = "tab_settings";
-pub const TAB_ABOUT_EVENT: &str = "tab_about";
 
 // 激活流程
 pub const ACT_START_EVENT: &str = "act_start";
@@ -33,18 +36,33 @@ pub const CHAT_OPEN_PREFIX: &str = "chat:open:";
 pub const CHAT_DEL_PREFIX: &str = "chat:del:";
 pub const CHAT_BACK_EVENT: &str = "chat:back";
 pub const CHAT_LOAD_OLDER_EVENT: &str = "chat:older";
-pub const CHAT_PROVIDER_EVENT: &str = "chat:provider";
 pub const CHAT_MODEL_EVENT: &str = "chat:model";
 pub const CHAT_INPUT_EVENT: &str = "chat:input";
 pub const CHAT_SEND_EVENT: &str = "chat:send";
 pub const CHAT_STOP_EVENT: &str = "chat:stop";
+
+// 文件管理
+pub const FILES_REFRESH_EVENT: &str = "files:refresh";
+pub const FILES_OPEN_PREFIX: &str = "files:open:";
+pub const FILES_BACK_EVENT: &str = "files:back";
+
+// AI 设置
+pub const AI_REFRESH_EVENT: &str = "ai:refresh";
+pub const AI_PROVIDER_EVENT: &str = "ai:provider";
+pub const AI_PROMPT_NEW_EVENT: &str = "ai:prompt_new";
+pub const AI_PROMPT_SAVE_EVENT: &str = "ai:prompt_save";
+pub const AI_PROMPT_CANCEL_EVENT: &str = "ai:prompt_cancel";
+pub const AI_PROMPT_EDIT_PREFIX: &str = "ai:prompt_edit:";
+pub const AI_PROMPT_DEL_PREFIX: &str = "ai:prompt_del:";
+pub const AI_PROMPT_NAME_INPUT: &str = "ai:prompt_name_input";
+pub const AI_PROMPT_CONTENT_INPUT: &str = "ai:prompt_content_input";
 
 // 设置
 pub const SET_REFRESH_AUTH_EVENT: &str = "set:refresh_auth";
 pub const SET_TOGGLE_KEY_EVENT: &str = "set:toggle_key";
 pub const SET_REVOKE_EVENT: &str = "set:revoke";
 
-// 关于
+// 关于（并入设置页）
 pub const OPEN_HELP_DOC_EVENT: &str = "open_help_doc";
 pub const OPEN_QQ_GROUP_EVENT: &str = "open_qq_group";
 
@@ -90,8 +108,7 @@ fn parse_message(payload: &str) -> ParsedMessage {
 pub async fn handle_interconnect_message(payload: &str) {
     let mut parsed = parse_message(payload);
 
-    // 兜底：个别宿主回执可能不带 addr/pkgName，用第一台设备与固定包名补齐，
-    // 与发送请求时的来源保持一致，pending 键仍可匹配（对齐 Eternal 的宽松处理）
+    // 兜底：个别宿主回执可能不带 addr/pkgName，用第一台设备与固定包名补齐
     if parsed.addr.is_empty() {
         if let Some(addr) = state::first_device_addr() {
             parsed.addr = addr;
@@ -187,28 +204,64 @@ pub async fn ui_event_processor(
         }
         return;
     }
+    if let Some(idx_str) = event_id.strip_prefix(FILES_OPEN_PREFIX) {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            files::open_file(idx).await;
+        }
+        return;
+    }
+    if let Some(idx_str) = event_id.strip_prefix(AI_PROMPT_EDIT_PREFIX) {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            prompts::edit_prompt(idx);
+            rerender();
+        }
+        return;
+    }
+    if let Some(idx_str) = event_id.strip_prefix(AI_PROMPT_DEL_PREFIX) {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            prompts::delete_prompt(idx).await;
+        }
+        return;
+    }
 
     match event_id {
         // Tab
         TAB_CHAT_EVENT => {
             switch_tab(MainTab::Chat);
-            // 进入聊天 Tab 时按需拉取一次会话与供应商，避免重复拉起快应用
             if state::is_activated() {
-                let need_sessions = state::with_state(|s| s.sessions.is_empty());
-                // 官方占位对象的模型列表为空，说明还没拉过供应商
+                if state::with_state(|s| s.sessions.is_empty()) {
+                    chat::refresh_sessions().await;
+                }
+                // 模型选择器依赖供应商数据，进入聊天页时同样按需预拉
                 let need_providers = state::with_state(|s| {
                     s.active_provider.is_official && s.active_provider.models.is_empty()
                 });
-                if need_sessions {
-                    chat::refresh_sessions().await;
-                }
                 if need_providers {
                     chat::refresh_providers().await;
                 }
             }
         }
+        TAB_FILES_EVENT => {
+            switch_tab(MainTab::Files);
+            if state::is_activated() && state::with_state(|s| s.files_groups.is_empty()) {
+                files::refresh_files().await;
+            }
+        }
+        TAB_AI_EVENT => {
+            switch_tab(MainTab::AiSettings);
+            if state::is_activated() {
+                let need_providers = state::with_state(|s| {
+                    s.active_provider.is_official && s.active_provider.models.is_empty()
+                });
+                if need_providers {
+                    chat::refresh_providers().await;
+                }
+                if state::with_state(|s| s.prompts.is_empty()) {
+                    prompts::refresh_prompts().await;
+                }
+            }
+        }
         TAB_SETTINGS_EVENT => switch_tab(MainTab::Settings),
-        TAB_ABOUT_EVENT => switch_tab(MainTab::About),
 
         // 激活
         ACT_START_EVENT | ACT_RETRY_EVENT => activation::start_activation().await,
@@ -227,10 +280,6 @@ pub async fn ui_event_processor(
         CHAT_NEW_EVENT => chat::new_session().await,
         CHAT_BACK_EVENT => chat::back_to_list(),
         CHAT_LOAD_OLDER_EVENT => chat::load_older().await,
-        CHAT_PROVIDER_EVENT => {
-            let label = parse_event_value(event_payload);
-            chat::select_provider_by_label(&label).await;
-        }
         CHAT_MODEL_EVENT => {
             let model = parse_event_value(event_payload);
             state::set_selected_model(&model);
@@ -243,6 +292,35 @@ pub async fn ui_event_processor(
         CHAT_SEND_EVENT => chat::send_message().await,
         CHAT_STOP_EVENT => chat::stop_streaming(),
 
+        // 文件管理
+        FILES_REFRESH_EVENT => files::refresh_files().await,
+        FILES_BACK_EVENT => files::back_to_groups(),
+
+        // AI 设置
+        AI_REFRESH_EVENT => {
+            chat::refresh_providers().await;
+            prompts::refresh_prompts().await;
+        }
+        AI_PROVIDER_EVENT => {
+            let label = parse_event_value(event_payload);
+            chat::select_provider_by_label(&label).await;
+        }
+        AI_PROMPT_NEW_EVENT => {
+            prompts::new_prompt();
+            rerender();
+        }
+        AI_PROMPT_SAVE_EVENT => prompts::save_prompt().await,
+        AI_PROMPT_CANCEL_EVENT => {
+            state::begin_prompt_edit(None, "", "");
+            rerender();
+        }
+        AI_PROMPT_NAME_INPUT => {
+            state::set_prompt_name_draft(&parse_event_value(event_payload));
+        }
+        AI_PROMPT_CONTENT_INPUT => {
+            state::set_prompt_content_draft(&parse_event_value(event_payload));
+        }
+
         // 设置
         SET_REFRESH_AUTH_EVENT => activation::refresh_auth_info().await,
         SET_TOGGLE_KEY_EVENT => {
@@ -251,7 +329,7 @@ pub async fn ui_event_processor(
         }
         SET_REVOKE_EVENT => activation::delete_local_auth().await,
 
-        // 关于
+        // 关于（并入设置页）
         OPEN_HELP_DOC_EVENT => dialog::open_url("https://docs.b4qaq.cn/docs/eclipse/"),
         OPEN_QQ_GROUP_EVENT => dialog::open_url(
             "http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=1vc4XKmAyGeJJTmXumfkaaxRcQl1hMaK",

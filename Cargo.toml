@@ -1,6 +1,6 @@
 [package]
 name = "eclipse_sync_astrobox_v2_plugin"
-version = "1.5.1"
+version = "1.6.0"
 edition = "2024"
 
 [lib]

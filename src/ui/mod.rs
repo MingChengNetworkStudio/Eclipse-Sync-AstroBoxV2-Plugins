@@ -3,8 +3,10 @@ pub mod api_client;
 pub mod build;
 pub mod chat;
 pub mod event_handler;
+pub mod files;
 pub mod icons;
 pub mod persist;
+pub mod prompts;
 pub mod protocol;
 pub mod state;
 

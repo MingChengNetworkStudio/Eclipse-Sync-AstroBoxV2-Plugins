@@ -43,6 +43,16 @@ pub enum PendingKind {
     SetActiveProvider,
     /// PUT_SESSION_UPDATE 回执，携带会话 id
     UpdateSession(String),
+    /// GET_FILES_GROUPED 回执
+    FilesGrouped,
+    /// GET_SESSION_FILE 回执，携带 (会话 id, 文件名)
+    OpenFile(String, String),
+    /// GET_PROMPTS 回执
+    Prompts,
+    /// PUT_PROMPT 回执（保存后刷新列表）
+    PutPrompt,
+    /// DEL_PROMPT 回执，携带被删设定 id
+    DelPrompt(String),
 }
 
 struct PendingEntry {
@@ -314,6 +324,79 @@ pub async fn set_active_provider(provider_id: &str) -> Result<(), String> {
         "PUT_PROVIDER_ACTIVE_DONE",
         Some(json!({ "id": provider_id })),
         PendingKind::SetActiveProvider,
+    )
+    .await
+}
+
+// ========== 文件管理 ==========
+
+/// 发起 GET_FILES_GROUPED（按会话分组的文件清单）
+pub async fn request_files_grouped() -> Result<(), String> {
+    let addr = require_addr().await?;
+    send(
+        &addr,
+        "GET_FILES_GROUPED",
+        "FILES_GROUPED",
+        None,
+        PendingKind::FilesGrouped,
+    )
+    .await
+}
+
+/// 发起 GET_SESSION_FILE 读取文本文件
+pub async fn request_session_file(session_id: &str, name: &str) -> Result<(), String> {
+    let addr = require_addr().await?;
+    send(
+        &addr,
+        "GET_SESSION_FILE",
+        "SESSION_FILE",
+        Some(json!({ "id": session_id, "name": name })),
+        PendingKind::OpenFile(session_id.to_string(), name.to_string()),
+    )
+    .await
+}
+
+// ========== AI 设定 ==========
+
+/// 发起 GET_PROMPTS
+pub async fn request_prompts() -> Result<(), String> {
+    let addr = require_addr().await?;
+    send(
+        &addr,
+        "GET_PROMPTS",
+        "PROMPTS",
+        None,
+        PendingKind::Prompts,
+    )
+    .await
+}
+
+/// 发起 PUT_PROMPT（id 为空表示新建）
+pub async fn put_prompt(id: Option<&str>, name: &str, content: &str) -> Result<(), String> {
+    let addr = require_addr().await?;
+    let mut data = json!({ "name": name, "content": content });
+    if let Some(id) = id.filter(|s| !s.is_empty()) {
+        data["id"] = json!(id);
+    }
+    send(
+        &addr,
+        "PUT_PROMPT",
+        "PUT_PROMPT_DONE",
+        Some(data),
+        PendingKind::PutPrompt,
+    )
+    .await
+}
+
+/// 发起 DEL_PROMPT
+pub async fn delete_prompt(prompt_id: &str) -> Result<(), String> {
+    let addr = require_addr().await?;
+    send(
+        &addr,
+        "DEL_PROMPT",
+        "DEL_PROMPT_DONE",
+        Some(json!({ "id": prompt_id })),
+        PendingKind::DelPrompt(prompt_id.to_string()),
     )
     .await
 }

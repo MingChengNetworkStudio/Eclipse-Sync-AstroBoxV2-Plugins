@@ -527,6 +527,19 @@ pub async fn dispatch_reply(kind: PendingKind, ok: bool, status: &str, data: Opt
         PendingKind::UpdateSession(id) => on_session_updated_reply(&id, ok, status).await,
         PendingKind::Providers => on_providers_reply(ok, data),
         PendingKind::SetActiveProvider => on_active_provider_reply(ok, data),
+        PendingKind::FilesGrouped => {
+            crate::ui::files::on_files_reply(ok, status, data).await
+        }
+        PendingKind::OpenFile(sid, name) => {
+            crate::ui::files::on_file_reply(&sid, &name, ok, status, data).await
+        }
+        PendingKind::Prompts => crate::ui::prompts::on_prompts_reply(ok, data),
+        PendingKind::PutPrompt => {
+            crate::ui::prompts::on_prompt_saved(ok, status).await
+        }
+        PendingKind::DelPrompt(id) => {
+            crate::ui::prompts::on_prompt_deleted(&id, ok, status).await
+        }
         // 激活相关与纯记录类回执不在此处理
         PendingKind::ActApikey
         | PendingKind::ActDeviceInfo

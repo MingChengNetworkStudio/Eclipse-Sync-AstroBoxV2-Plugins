@@ -21,8 +21,9 @@ pub const OFFICIAL_ID: &str = "official";
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MainTab {
     Chat,
+    Files,
+    AiSettings,
     Settings,
-    About,
 }
 
 /// 激活流程状态机
@@ -146,6 +147,22 @@ pub struct PluginState {
     /// 上次流式重渲染时间戳（节流用，ms）
     pub last_stream_render_ms: u128,
 
+    // ----- 文件管理 -----
+    /// GET_FILES_GROUPED 回执：[{id, title, files:[相对路径]}]
+    pub files_groups: Vec<serde_json::Value>,
+    pub files_loading: bool,
+    /// 文件预览：(文件名, 文本内容或错误提示)
+    pub file_preview: Option<(String, String)>,
+
+    // ----- AI 设定 -----
+    /// GET_PROMPTS 回执：[{id, name, content, ...}]
+    pub prompts: Vec<serde_json::Value>,
+    pub prompts_loading: bool,
+    /// 编辑中的设定 id（None 表示新建）
+    pub prompt_edit_id: Option<String>,
+    pub prompt_name_draft: String,
+    pub prompt_content_draft: String,
+
     /// 渲染计数（调试/统计用）
     pub render_tick: u64,
 }
@@ -181,6 +198,14 @@ pub fn with_state<R>(f: impl FnOnce(&mut PluginState) -> R) -> R {
             sending: false,
             streaming_text: String::new(),
             last_stream_render_ms: 0,
+            files_groups: Vec::new(),
+            files_loading: false,
+            file_preview: None,
+            prompts: Vec::new(),
+            prompts_loading: false,
+            prompt_edit_id: None,
+            prompt_name_draft: String::new(),
+            prompt_content_draft: String::new(),
             render_tick: 0,
         })
     });
@@ -263,6 +288,14 @@ pub fn clear_activation() {
         s.draft.clear();
         s.sending = false;
         s.streaming_text.clear();
+        s.files_groups.clear();
+        s.files_loading = false;
+        s.file_preview = None;
+        s.prompts.clear();
+        s.prompts_loading = false;
+        s.prompt_edit_id = None;
+        s.prompt_name_draft.clear();
+        s.prompt_content_draft.clear();
         s.render_tick = s.render_tick.wrapping_add(1);
     });
     persist::delete_config();
@@ -479,4 +512,57 @@ pub fn persist_now() {
         api_key: s.api_key.clone(),
     });
     persist::save_config(&config);
+}
+
+// ========== 文件管理 ==========
+
+pub fn set_files_groups(groups: Vec<serde_json::Value>) {
+    with_state(|s| {
+        s.files_groups = groups;
+        s.files_loading = false;
+        s.render_tick = s.render_tick.wrapping_add(1);
+    });
+}
+
+pub fn set_files_loading(loading: bool) {
+    with_state(|s| s.files_loading = loading);
+}
+
+pub fn set_file_preview(preview: Option<(String, String)>) {
+    with_state(|s| {
+        s.file_preview = preview;
+        s.render_tick = s.render_tick.wrapping_add(1);
+    });
+}
+
+// ========== AI 设定 ==========
+
+pub fn set_prompts(prompts: Vec<serde_json::Value>) {
+    with_state(|s| {
+        s.prompts = prompts;
+        s.prompts_loading = false;
+        s.render_tick = s.render_tick.wrapping_add(1);
+    });
+}
+
+pub fn set_prompts_loading(loading: bool) {
+    with_state(|s| s.prompts_loading = loading);
+}
+
+/// 进入编辑态（id=None 为新建），并把草稿填充为该设定现有内容
+pub fn begin_prompt_edit(id: Option<String>, name: &str, content: &str) {
+    with_state(|s| {
+        s.prompt_edit_id = id;
+        s.prompt_name_draft = name.to_string();
+        s.prompt_content_draft = content.to_string();
+        s.render_tick = s.render_tick.wrapping_add(1);
+    });
+}
+
+pub fn set_prompt_name_draft(text: &str) {
+    with_state(|s| s.prompt_name_draft = text.to_string());
+}
+
+pub fn set_prompt_content_draft(text: &str) {
+    with_state(|s| s.prompt_content_draft = text.to_string());
 }
