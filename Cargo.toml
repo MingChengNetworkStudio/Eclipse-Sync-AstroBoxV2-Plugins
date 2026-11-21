@@ -1,0 +1,20 @@
+[package]
+name = "eclipse_sync_astrobox_v2_plugin"
+version = "1.5.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# V4 官方绑定 crate：内置 psys-world-v4 的 WIT（wit-bindgen 0.57，原生 async）
+astrobox-ng-wit = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-appender = "0.2"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+waki = "0.5.1"
+url = "2"
+urlencoding = "2"
+flate2 = "1"
